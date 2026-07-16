@@ -1,23 +1,32 @@
-"""DINOv2 CLS 임베딩 기반 차분/중복 후보 탐지 + `_sabun` 리네임 규칙 (공용 로직).
+"""DINOv2 CLS 임베딩 + centroid 응집형(agglomerative) 그룹핑 상태 모델 (공용 로직).
 
-`0a_dedup_raw.py` 가 import 한다. `app.py` 가 WD14Tagger 를 담고 `1_tag_dataset.py` 가
-재사용하는 것과 같은 구조다.
+파이프라인 0단계인 `0_dedup_raw.py` 가 import 한다. `app.py` 가 WD14Tagger 를 담고
+`1_tag_dataset.py` 가 재사용하는 것과 같은 구조다.
 
-여기서 다루는 이름은 두 종류다.
+설계 (2026-07 재설계):
+  - dataset_raw/<원시> 의 원본 파일은 **완전 read-only**. 리네임/이동/삭제 안 한다.
+  - 그룹핑 / 제외 / 강조(specialize) 현황은 `.dedup/<name>/state.json` 메타데이터로만 관리.
+  - 기본적으로 모든 이미지는 개별 그룹(싱글턴). 그룹은 centroid 임베딩으로 대표되어
+    다시 클러스터링 대상이 된다(응집형). threshold 를 낮춰가며 후보 쌍을 병합한다.
+  - cannot_link: 두 엔티티가 "같은 그룹이 아니다"라고 명시하면(rel 쌍으로 저장) 자동 병합 후보에서
+    영구히 제외된다.
+  - 익스포트: state + repeat/rounding 으로 dataset/<name>/repeat_<N>/ 심볼릭 링크를 만든다
+    (파일명 규칙이 아니라 그룹 메타데이터가 반복수를 구동한다).
+      · 그룹 전체 반복수 합 = R (강조 그룹 = 2R). 그룹 크기 k 면 각 멤버 round(total/k).
+      · 제외 이미지는 익스포트에서 빠진다.
 
-  rel   : raw_dir 기준 상대경로 (예: `C99_FAKE DOLL_2120939/07_7.png`)
-  flat  : 그 상대경로의 `/` 를 `__` 로 치환한 것 (`C99_FAKE DOLL_2120939__07_7.png`)
-
-`0_process_raw.py` 는 **flat** 이름으로 차분/강조를 판정하므로, 그룹핑과 검증도 flat 기준으로
-한다. 다만 실제 리네임은 basename 만 바꾼다(파일은 원래 디렉토리에 그대로 둔다).
+이름 규약:
+  rel   : raw_dir 기준 상대경로 (POSIX). state.json 의 안정적 키다(파일은 read-only 라 불변).
+  flat  : 그 상대경로의 `/` 를 `__` 로 치환한 것. 익스포트 심볼릭 링크의 파일명.
 """
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
-import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
@@ -26,91 +35,44 @@ from PIL import Image, ImageOps
 
 ROOT = Path(__file__).resolve().parent
 RAW_ROOT = ROOT / "dataset_raw"
+DATASET_ROOT = ROOT / "dataset"
 CACHE_ROOT = ROOT / ".dedup"
 
-# app.py 와 동일 규약. 이 모듈은 onnxruntime 태깅 스택과 무관하므로 app 을 import 하지 않고
-# 상수만 로컬에 둔다 (2_make_config.py 가 같은 이유로 복제하는 것과 동일).
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"}
-
 MODEL_REPO = os.environ.get("DINOV2_MODEL", "facebook/dinov2-base")
 
+# 임베딩 속도의 실제 병목은 GPU forward(수백 ms)가 아니라 PIL 디코드/리사이즈다. 그래서 이미지
+# 로딩을 스레드풀로 병렬화한다(항상 켜짐 — 값이 안 바뀌는 결정론적 이득). WORKERS=0 이면 자동.
+WORKERS = int(os.environ.get("DINOV2_WORKERS", "0") or "0")
+
+# fast 모드: DINOv2 를 half precision(GPU 에서 bf16, 미지원이면 fp16)으로 돌리고 fast 이미지
+# 프로세서를 쓴다. GPU forward 가 이미 짧아 이득은 작지만, 값이 fp32 와 미세하게 달라지므로
+# 캐시를 모드별로 태깅(_cache_mode)해 모드 전환 시 자동 무효화한다 — 수동 삭제 불필요.
+# 프로세스 전역 스위치(CLI --fast / 환경변수 DINOV2_FAST=1).
+FAST = os.environ.get("DINOV2_FAST", "").lower() in ("1", "true", "yes", "on")
+
+
+def _cache_mode() -> str:
+    return "fast" if FAST else "full"
+
+
+def _default_workers() -> int:
+    return WORKERS if WORKERS > 0 else min(16, (os.cpu_count() or 8))
+
+
+STATE_VERSION = 2
+
+
 # ---------------------------------------------------------------------------
-# 이름 규칙
-#
-# 아래 두 상수는 0_process_raw.py 의 것과 **반드시 동일해야 한다**. 숫자로 시작하는 모듈은
-# import 할 수 없어(`import 0_process_raw` = SyntaxError) 복제한다.
+# 경로 / 이미지 수집
 # ---------------------------------------------------------------------------
-SABUN_RE = re.compile(r"_sabun(?:_.*)?$")
-SPECIAL_MARKER = "_special_"
-
-# 0_process_raw.py 가 인식하지 못하는 `_sabun1` 류까지 포함해 잡아내는 느슨한 패턴.
-# 그룹 시드(기존 표기로 이미 묶여 있던 것)와 규칙 위반 경고에 쓴다.
-LOOSE_SABUN_RE = re.compile(r"_sabun(?:\d+|_.*)?$")
-
-SABUN_SUFFIX = "_sabun_{n}"  # 규칙에 맞는 차분 접미사. web UI 의 JS 와 같은 규칙.
-
-# 제외된 이미지는 raw_dir 의 **형제** 폴더 `dataset_raw/<name>_excluded/` 로 옮긴다.
-# raw_dir 안에 두면 0_process_raw.py 의 rglob 이 제외한 이미지를 그대로 다시 긁어간다.
-# 내부적으로는 이 접두사를 붙인 rel 문자열 하나로 다루고(`..` 없는 순수 상대경로 유지),
-# 실제 경로 변환은 resolve_rel() 이 담당한다.
-EXCLUDE_PREFIX = "_excluded/"
-
-
-def sabun_base(stem: str) -> str:
-    """차분 접미사를 제거한 그룹 base. 0_process_raw.sabun_base 와 동일."""
-    return SABUN_RE.sub("", stem)
-
-
-def loose_base(stem: str) -> str:
-    """`_sabun1` 같은 비규격 표기까지 벗겨낸 그룹 base (그룹 시드용)."""
-    return LOOSE_SABUN_RE.sub("", stem)
-
-
-def is_sabun(stem: str) -> bool:
-    return SABUN_RE.search(stem) is not None
-
-
-def is_special(stem: str) -> bool:
-    """0_process_raw 판정과 동일: 차분 접미사를 벗긴 base 에 `_special_` 이 있는가."""
-    return SPECIAL_MARKER in sabun_base(stem)
-
-
-def malformed_sabun(stem: str) -> bool:
-    """`_sabun1` 처럼 차분 의도로 보이나 0_process_raw 가 인식 못 하는 이름인가."""
-    return LOOSE_SABUN_RE.search(stem) is not None and not is_sabun(stem)
-
-
 def flat_name(rel: PurePosixPath | str) -> str:
-    """rel 경로를 0_process_raw 와 같은 규약으로 플래트닝."""
+    """rel 경로를 `/` → `__` 로 플래트닝. 익스포트 심볼릭 링크 파일명."""
     return str(rel).replace("/", "__").replace(os.sep, "__")
 
 
-def flat_stem(rel: PurePosixPath | str) -> str:
-    name = flat_name(rel)
-    suffix = PurePosixPath(name).suffix
-    return name[: -len(suffix)] if suffix else name
-
-
-def dir_prefix(rel: PurePosixPath | str) -> str:
-    """flat 이름 중 디렉토리에서 온 앞부분. 최상위 파일이면 빈 문자열."""
-    parent = PurePosixPath(str(rel)).parent
-    return "" if str(parent) == "." else flat_name(parent) + "__"
-
-
-def inherits_special(rel: PurePosixPath | str) -> bool:
-    """원시 폴더명(`*_special/`) 때문에 이미 강조로 판정되는가.
-
-    mystyle_raw/album1_special/ 처럼 앨범 폴더가 강조인 경우, basename 을
-    건드리지 않아도 flat 이름에 `_special_` 이 들어간다. 이 경우 UI 의 강조 토글은 의미가 없다.
-    """
-    return SPECIAL_MARKER in dir_prefix(rel)
-
-
-# ---------------------------------------------------------------------------
-# 이미지 수집
-# ---------------------------------------------------------------------------
 def resolve_raw(arg: str) -> Path:
-    """0_process_raw.resolve_raw 와 동일 규약: 경로거나 dataset_raw/<이름>."""
+    """경로거나 dataset_raw/<이름>."""
     p = Path(arg)
     if p.is_dir():
         return p.resolve()
@@ -120,62 +82,51 @@ def resolve_raw(arg: str) -> Path:
     raise SystemExit(f"[error] raw dataset not found: {arg} (dataset_raw/{arg} 확인)")
 
 
-def excluded_dir(raw_dir: Path) -> Path:
-    return raw_dir.parent / f"{raw_dir.name}_excluded"
-
-
-def resolve_rel(raw_dir: Path, rel: str) -> Path:
-    """rel 문자열 → 실제 경로. `_excluded/` 접두사는 형제 폴더로 보낸다."""
-    if rel.startswith(EXCLUDE_PREFIX):
-        return excluded_dir(raw_dir) / rel[len(EXCLUDE_PREFIX) :]
-    return raw_dir / rel
-
-
-def _scan(base: Path, prefix: str = "") -> list[str]:
+def _scan(base: Path) -> list[str]:
     if not base.is_dir():
         return []
     return [
-        prefix + p.relative_to(base).as_posix()
+        p.relative_to(base).as_posix()
         for p in sorted(base.rglob("*"))
         if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS
     ]
 
 
 def collect_images(raw_dir: Path) -> list[PurePosixPath]:
-    """raw_dir 아래 모든 이미지의 상대경로(POSIX). 제외 폴더는 형제라 잡히지 않는다."""
+    """raw_dir 아래 모든 이미지의 상대경로(POSIX)."""
     return [PurePosixPath(r) for r in _scan(raw_dir)]
 
 
-def collect_excluded(raw_dir: Path) -> list[str]:
-    """이미 제외해 둔 이미지의 rel (`_excluded/...`). 복구용."""
-    return _scan(excluded_dir(raw_dir), EXCLUDE_PREFIX)
-
-
-def collect_all(raw_dir: Path) -> list[str]:
-    """리네임 대상이 될 수 있는 전부 (제외 폴더 포함)."""
-    return _scan(raw_dir) + collect_excluded(raw_dir)
+def resolve_rel(raw_dir: Path, rel: str) -> Path:
+    """rel 문자열 → 실제 경로. raw 는 read-only 라 항상 raw_dir 아래다."""
+    return raw_dir / rel
 
 
 def cache_dir(raw_dir: Path) -> Path:
-    """임베딩/썸네일/undo 로그 위치.
-
-    raw_dir **바깥**에 둔다. 안에 두면 0_process_raw.py 의 rglob 이 썸네일 .jpg 까지
-    학습 이미지로 긁어간다.
-    """
+    """임베딩/썸네일/state 위치. raw_dir 바깥(.dedup/<name>/)에 둔다."""
     d = CACHE_ROOT / raw_dir.name
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
+def list_raw_datasets() -> list[str]:
+    """dataset_raw/ 아래의 원시 데이터셋 이름들."""
+    if not RAW_ROOT.is_dir():
+        return []
+    return sorted(
+        p.name for p in RAW_ROOT.iterdir()
+        if p.is_dir() and not p.name.startswith(".")
+    )
+
+
 # ---------------------------------------------------------------------------
-# DINOv2 임베딩
+# DINOv2 임베딩  (재설계 전과 동일 — 원본을 읽기만 한다)
 # ---------------------------------------------------------------------------
 def load_square_rgb(path: Path, size: int) -> Image.Image:
     """알파를 흰 배경에 합성 → 정사각 패딩 → size x size.
 
-    app.py 의 _prepare_image 와 같은 규약(정사각 패딩)이다. DINOv2 기본 전처리는
-    shortest-edge 256 → center-crop 224 라서 세로로 긴 일러스트의 위아래가 잘려나간다.
-    차분 판별은 전체 구도를 봐야 하므로 크롭 대신 패딩한다. (224 = 16*14, DINOv2 patch=14)
+    app.py 의 _prepare_image 와 같은 규약(정사각 패딩). DINOv2 기본 전처리는 center-crop 이라
+    세로로 긴 일러스트가 잘려 구도 비교가 어긋난다. (224 = 16*14, DINOv2 patch=14)
     """
     image = Image.open(path)
     image = ImageOps.exif_transpose(image)
@@ -195,13 +146,17 @@ def load_square_rgb(path: Path, size: int) -> Image.Image:
 class Dinov2Embedder:
     """facebook/dinov2-base 의 CLS 토큰을 L2 정규화해서 반환한다 (코사인 = 내적)."""
 
-    def __init__(self, repo: str = MODEL_REPO, device: str | None = None, batch_size: int = 16):
+    def __init__(self, repo: str = MODEL_REPO, device: str | None = None, batch_size: int = 16,
+                 fast: bool = False, workers: int | None = None):
         self.repo = repo
         self.device = device
         self.batch_size = batch_size
+        self.fast = fast
+        self.workers = workers if workers else _default_workers()
         self._model = None
         self._proc = None
         self._size = 224
+        self._dtype = None
 
     def _load(self) -> None:
         if self._model is not None:
@@ -211,14 +166,42 @@ class Dinov2Embedder:
 
         if self.device is None:
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self._proc = AutoImageProcessor.from_pretrained(self.repo)
-        self._model = AutoModel.from_pretrained(self.repo).to(self.device).eval()
-        print(f"[dinov2] {self.repo} on {self.device} (hidden={self._model.config.hidden_size})")
+        # fast 모드에서는 fast(텐서) 이미지 프로세서도 쓴다. 우리는 do_resize/center_crop 을
+        # 끄고 미리 224 정사각으로 맞춰 넣으므로 정규화만 남아 값 차이는 무시할 수준이고,
+        # 명시 지정하면 use_fast 경고도 사라진다. full 모드는 기존과 동일한 slow 프로세서.
+        self._proc = AutoImageProcessor.from_pretrained(self.repo, use_fast=self.fast)
+        model = AutoModel.from_pretrained(self.repo)
+        # half precision 은 GPU 에서만 의미가 있다(CPU 는 fp32 로 폴백).
+        if self.fast and self.device == "cuda":
+            self._dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+            model = model.to(self.device, dtype=self._dtype)
+        else:
+            self._dtype = torch.float32
+            model = model.to(self.device)
+        self._model = model.eval()
+        tag = {torch.bfloat16: "bf16", torch.float16: "fp16", torch.float32: "fp32"}[self._dtype]
+        print(f"[dinov2] {self.repo} on {self.device} ({tag}, load×{self.workers}, "
+              f"hidden={self._model.config.hidden_size})")
+
+    def _forward(self, images: list) -> np.ndarray:
+        import torch
+
+        inputs = self._proc(
+            images=images, do_resize=False, do_center_crop=False, return_tensors="pt"
+        ).to(self.device)
+        if self._dtype != torch.float32:
+            inputs = {k: (v.to(self._dtype) if torch.is_floating_point(v) else v)
+                      for k, v in inputs.items()}
+        hidden = self._model(**inputs).last_hidden_state
+        cls = torch.nn.functional.normalize(hidden[:, 0], dim=-1)
+        return cls.float().cpu().numpy()
 
     def embed(self, paths: list[Path], progress=None, on_ready=None) -> np.ndarray:
         """on_ready: 모델 로딩이 끝나고 실제 임베딩이 시작되는 시점에 불린다.
-        첫 호출은 모델을 올리느라 수 초 걸리는데, 그 구간을 진행률 0% 로 보여주면
-        멈춘 것처럼 보인다."""
+
+        병목은 PIL 디코드/리사이즈(CPU)라 스레드풀로 병렬 로딩하면서 준비되는 대로 배치를 GPU 에
+        흘려보낸다(로딩·forward 겹침). map 은 입력 순서를 보존하므로 결과 순서는 순차 로딩과 같다.
+        """
         self._load()
         if on_ready:
             on_ready()
@@ -226,31 +209,35 @@ class Dinov2Embedder:
 
         dim = self._model.config.hidden_size
         out = np.zeros((len(paths), dim), dtype=np.float32)
-        with torch.inference_mode():
-            for i in range(0, len(paths), self.batch_size):
-                chunk = paths[i : i + self.batch_size]
-                images = [load_square_rgb(p, self._size) for p in chunk]
-                # 이미 정사각 224 로 맞췄으므로 프로세서는 rescale/normalize 만 하게 한다.
-                inputs = self._proc(
-                    images=images, do_resize=False, do_center_crop=False, return_tensors="pt"
-                ).to(self.device)
-                hidden = self._model(**inputs).last_hidden_state  # (B, 1+patches, D)
-                cls = torch.nn.functional.normalize(hidden[:, 0], dim=-1)
-                out[i : i + len(chunk)] = cls.float().cpu().numpy()
+        if not len(paths):
+            return out
+        with torch.inference_mode(), ThreadPoolExecutor(max_workers=self.workers) as pool:
+            loaded = pool.map(lambda p: load_square_rgb(p, self._size), paths)
+            batch, done = [], 0
+            for img in loaded:
+                batch.append(img)
+                if len(batch) >= self.batch_size:
+                    out[done : done + len(batch)] = self._forward(batch)
+                    done += len(batch)
+                    batch = []
+                    if progress:
+                        progress(done, len(paths))
+            if batch:
+                out[done : done + len(batch)] = self._forward(batch)
+                done += len(batch)
                 if progress:
-                    progress(min(i + self.batch_size, len(paths)), len(paths))
+                    progress(done, len(paths))
         return out
 
 
 _EMBEDDER: Dinov2Embedder | None = None
 
 
-def get_embedder(batch_size: int = 16) -> Dinov2Embedder:
-    """프로세스당 하나만 만든다. 웹 UI 에서 데이터셋을 갈아탈 때마다 모델을 다시 올리면
-    전환이 매번 수 초씩 느려진다."""
+def get_embedder(batch_size: int = 16, fast: bool = False) -> Dinov2Embedder:
+    """프로세스당 하나만 만든다(데이터셋 전환마다 모델 재로딩 방지). fast 가 바뀌면 재생성."""
     global _EMBEDDER
-    if _EMBEDDER is None:
-        _EMBEDDER = Dinov2Embedder(batch_size=batch_size)
+    if _EMBEDDER is None or _EMBEDDER.fast != fast:
+        _EMBEDDER = Dinov2Embedder(batch_size=batch_size, fast=fast)
     _EMBEDDER.batch_size = batch_size
     return _EMBEDDER
 
@@ -261,31 +248,34 @@ def _sig(path: Path) -> list:
 
 
 def _read_cache(raw_dir: Path, sigs: dict[str, list]) -> dict[str, np.ndarray]:
-    """캐시에서 파일이 그대로인(mtime+size 일치) 임베딩만 골라 온다."""
     cache = cache_dir(raw_dir) / "embeddings.npz"
     if not cache.exists():
         return {}
     try:
         blob = np.load(cache, allow_pickle=False)
+        # 다른 정밀도(fast/full)로 만든 임베딩은 섞으면 안 된다 → 전량 무효 취급.
+        # (구형 캐시는 mode 키가 없다 = fp32 = "full")
+        stored_mode = str(blob["mode"]) if "mode" in blob.files else "full"
+        if stored_mode != _cache_mode():
+            return {}
         out = {}
         for i, k in enumerate(blob["keys"]):
             k = str(k)
             if k in sigs and list(blob["sigs"][i]) == sigs[k]:
                 out[k] = blob["emb"][i]
         return out
-    except Exception as exc:  # 캐시가 깨졌으면 조용히 버리고 다시 만든다
+    except Exception as exc:
         print(f"[warn] 임베딩 캐시 무시: {exc}")
         return {}
 
 
 def pending_count(raw_dir: Path, rels: list[PurePosixPath]) -> int:
-    """아직 임베딩되지 않은 이미지 수. 0 이면 바로 그룹핑할 수 있다."""
     sigs = {str(r): _sig(raw_dir / r) for r in rels}
     return len(rels) - len(_read_cache(raw_dir, sigs))
 
 
 def cached_embeddings(raw_dir: Path, rels: list[PurePosixPath]) -> np.ndarray | None:
-    """전부 캐시돼 있으면 스택해서, 하나라도 없으면 None. (임베딩을 새로 돌리지 않는다)"""
+    """전부 캐시돼 있으면 rels 순으로 스택, 하나라도 없으면 None."""
     sigs = {str(r): _sig(raw_dir / r) for r in rels}
     cached = _read_cache(raw_dir, sigs)
     if len(cached) != len(rels):
@@ -293,31 +283,29 @@ def cached_embeddings(raw_dir: Path, rels: list[PurePosixPath]) -> np.ndarray | 
     return np.stack([cached[str(r)] for r in rels]).astype(np.float32)
 
 
-def build_embeddings(
-    raw_dir: Path,
-    rels: list[PurePosixPath],
-    *,
-    force: bool = False,
-    batch_size: int = 16,
-    progress=None,
-    on_ready=None,
-) -> np.ndarray:
-    """임베딩 캐시(.dedup/<name>/embeddings.npz)를 채우고 전체를 반환한다.
+def embedding_map(raw_dir: Path, rels: list[PurePosixPath]) -> dict[str, np.ndarray] | None:
+    """{rel_str: 정규화 임베딩}. 하나라도 캐시 없으면 None."""
+    emb = cached_embeddings(raw_dir, rels)
+    if emb is None:
+        return None
+    return {str(r): emb[i] for i, r in enumerate(rels)}
 
-    progress(done, total) 콜백은 **아직 임베딩 안 된 것** 기준으로 불린다.
-    """
+
+def build_embeddings(raw_dir, rels, *, force=False, batch_size=16, progress=None, on_ready=None):
+    """임베딩 캐시(.dedup/<name>/embeddings.npz)를 채우고 전체를 반환한다."""
     keys = [str(r) for r in rels]
     sigs = {k: _sig(raw_dir / k) for k in keys}
     cached = {} if force else _read_cache(raw_dir, sigs)
 
     todo = [k for k in keys if k not in cached]
     if todo:
-        print(f"[dinov2] 임베딩 {len(todo)}장 (캐시 재사용 {len(cached)}장)")
-        emb = get_embedder(batch_size).embed([raw_dir / k for k in todo], progress, on_ready)
+        print(f"[dinov2] 임베딩 {len(todo)}장 ({_cache_mode()} 모드, 캐시 재사용 {len(cached)}장)")
+        emb = get_embedder(batch_size, fast=FAST).embed(
+            [raw_dir / k for k in todo], progress, on_ready)
         for i, k in enumerate(todo):
             cached[k] = emb[i]
     else:
-        print(f"[dinov2] 캐시 재사용 {len(cached)}장")
+        print(f"[dinov2] 캐시 재사용 {len(cached)}장 ({_cache_mode()} 모드)")
 
     stacked = np.stack([cached[k] for k in keys]).astype(np.float32)
     np.savez(
@@ -325,231 +313,369 @@ def build_embeddings(
         keys=np.array(keys),
         sigs=np.array([sigs[k] for k in keys], dtype=np.int64),
         emb=stacked,
+        mode=np.array(_cache_mode()),
     )
     return stacked
 
 
-def list_raw_datasets() -> list[str]:
-    """dataset_raw/ 아래의 원시 데이터셋 이름들. 제외 폴더는 뺀다."""
-    if not RAW_ROOT.is_dir():
-        return []
-    return sorted(
-        p.name for p in RAW_ROOT.iterdir()
-        if p.is_dir() and not p.name.endswith("_excluded") and not p.name.startswith(".")
-    )
-
-
 # ---------------------------------------------------------------------------
-# 그룹핑
-# ---------------------------------------------------------------------------
-class _UnionFind:
-    def __init__(self, n: int):
-        self.parent = list(range(n))
-
-    def find(self, x: int) -> int:
-        while self.parent[x] != x:
-            self.parent[x] = self.parent[self.parent[x]]
-            x = self.parent[x]
-        return x
-
-    def union(self, a: int, b: int) -> None:
-        ra, rb = self.find(a), self.find(b)
-        if ra != rb:
-            self.parent[max(ra, rb)] = min(ra, rb)
-
-
-def find_groups(
-    rels: list[PurePosixPath], emb: np.ndarray, threshold: float, *, seed_by_name: bool = True
-) -> list[list[int]]:
-    """코사인 유사도 >= threshold 를 잇는 연결요소 + 기존 파일명 시드.
-
-    반환: 크기 2 이상인 그룹들의 인덱스 목록 (그룹 내부는 rel 순).
-    """
-    n = len(rels)
-    uf = _UnionFind(n)
-
-    if seed_by_name:
-        # 이미 `_sabun*` 로 묶여 있던 것은 유사도와 무관하게 한 그룹으로 본다.
-        # (`_sabun1` 같은 비규격 표기를 교정 대상으로 UI 에 올리기 위해서도 필요)
-        by_base: dict[str, list[int]] = defaultdict(list)
-        for i, rel in enumerate(rels):
-            by_base[loose_base(flat_stem(rel))].append(i)
-        for idxs in by_base.values():
-            for j in idxs[1:]:
-                uf.union(idxs[0], j)
-
-    # 블록 단위 행렬곱 (수천 장까지 무리 없음)
-    block = 1024
-    for s in range(0, n, block):
-        sim = emb[s : s + block] @ emb.T  # (b, n)
-        for local, i in enumerate(range(s, min(s + block, n))):
-            hits = np.nonzero(sim[local] >= threshold)[0]
-            for j in hits:
-                if int(j) > i:
-                    uf.union(i, int(j))
-
-    groups: dict[int, list[int]] = defaultdict(list)
-    for i in range(n):
-        groups[uf.find(i)].append(i)
-    return [sorted(g) for g in groups.values() if len(g) > 1]
-
-
-# ---------------------------------------------------------------------------
-# 리네임 계획 / 검증 / 적용
+# 상태 (그룹핑 / 제외 / 강조) — .dedup/<name>/state.json
 # ---------------------------------------------------------------------------
 @dataclass
-class Check:
-    errors: list[str] = field(default_factory=list)
-    warnings: list[str] = field(default_factory=list)
+class State:
+    groups: list[dict] = field(default_factory=list)   # [{"members":[rel,...], "special":bool}]
+    excluded: list[str] = field(default_factory=list)
+    cannot_link: set = field(default_factory=set)      # {frozenset({relA,relB})}
 
 
-def check_flat_names(flats: list[str]) -> Check:
-    """최종 flat 이름 집합이 0_process_raw.py 를 통과할지 검증한다.
+def state_path(raw_dir: Path) -> Path:
+    return cache_dir(raw_dir) / "state.json"
 
-    errors 가 있으면 적용을 막는다. 0_process_raw 가 SystemExit 하는 조건이 곧 error 다.
+
+def _sort_groups(state: State) -> None:
+    for g in state.groups:
+        g["members"].sort()
+    state.groups.sort(key=lambda g: (-len(g["members"]), g["members"][0]))
+    state.excluded.sort()
+
+
+def load_state(raw_dir: Path, rels: list[PurePosixPath]) -> State:
+    """state.json 을 읽어 현재 raw 이미지 목록과 정합화한다.
+
+    - 저장돼 있지 않은(새로 추가된) 이미지는 싱글턴 그룹으로.
+    - 사라진(삭제된) 이미지는 그룹/제외/cannot_link 에서 제거.
+    저장은 비-기본 그룹(멤버>1 또는 강조)만 하므로, 나머지는 여기서 싱글턴으로 복원한다.
     """
-    out = Check()
-    counts: dict[str, int] = defaultdict(int)
-    for f in flats:
-        counts[f] += 1
-    for name, c in sorted(counts.items()):
-        if c > 1:
-            out.errors.append(f"플래트닝 이름 충돌: {name} ({c}개)")
+    rawset = {str(r) for r in rels}
+    p = state_path(raw_dir)
+    data = {}
+    if p.exists():
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except Exception as exc:
+            print(f"[warn] state.json 무시(새로 시작): {exc}")
 
-    groups: dict[str, list[str]] = defaultdict(list)
-    for f in flats:
-        stem = f[: -len(PurePosixPath(f).suffix)] if PurePosixPath(f).suffix else f
-        groups[sabun_base(stem)].append(stem)
+    excluded = [r for r in data.get("excluded", []) if r in rawset]
+    exset = set(excluded)
 
-    for base, stems in sorted(groups.items()):
-        has_sabun = any(is_sabun(s) for s in stems)
-        has_original = any(not is_sabun(s) for s in stems)
-        if has_sabun and not has_original:
-            # 0_process_raw.py:126 이 여기서 중단한다.
-            out.errors.append(f"차분 그룹에 원본이 없다 (원본 {base}.* 누락): {', '.join(stems)}")
-        if (SPECIAL_MARKER not in base) and ("special" in base.lower()):
-            # 0_process_raw.py:124 와 같은 경고.
-            out.warnings.append(f"'special' 문자열이 있으나 강조 마커(_special_)가 아님 → 표준 취급: {base}")
+    groups: list[dict] = []
+    assigned = set(exset)
+    for g in data.get("groups", []):
+        mem = [r for r in g.get("members", []) if r in rawset and r not in assigned]
+        if not mem:
+            continue
+        groups.append({"members": mem, "special": bool(g.get("special", False))})
+        assigned.update(mem)
 
-    for f in flats:
-        stem = f[: -len(PurePosixPath(f).suffix)] if PurePosixPath(f).suffix else f
-        if malformed_sabun(stem):
-            out.warnings.append(
-                f"차분처럼 보이나 0_process_raw 가 인식 못 하는 이름 (`_sabun_N` 으로 고칠 것): {f}"
-            )
+    for r in sorted(rawset):
+        if r not in assigned:
+            groups.append({"members": [r], "special": False})
+            assigned.add(r)
+
+    cannot = set()
+    for pair in data.get("cannot_link", []):
+        if len(pair) == 2 and pair[0] in rawset and pair[1] in rawset and pair[0] != pair[1] \
+                and pair[0] not in exset and pair[1] not in exset:
+            cannot.add(frozenset(pair))
+
+    state = State(groups=groups, excluded=excluded, cannot_link=cannot)
+    _sort_groups(state)
+    return state
+
+
+def save_state(raw_dir: Path, state: State) -> None:
+    _sort_groups(state)
+    # 싱글턴 기본 그룹은 저장하지 않는다(로드 때 복원). 멤버>1 또는 강조만.
+    keep = [g for g in state.groups if len(g["members"]) > 1 or g["special"]]
+    data = {
+        "version": STATE_VERSION,
+        "dataset": raw_dir.name,
+        "groups": [{"members": g["members"], "special": g["special"]} for g in keep],
+        "excluded": state.excluded,
+        "cannot_link": [sorted(p) for p in state.cannot_link],
+    }
+    state_path(raw_dir).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# 그룹 조회 / centroid / 후보
+# ---------------------------------------------------------------------------
+def _gidx_by_rel(state: State) -> dict[str, int]:
+    out = {}
+    for i, g in enumerate(state.groups):
+        for m in g["members"]:
+            out[m] = i
     return out
 
 
-def plan_moves(raw_dir: Path, targets: dict[str, str]) -> tuple[list[tuple[str, str]], Check]:
-    """targets: {현재 rel: 새 rel}. 실제로 바뀌는 것만 추려 검증한다.
-
-    반환: (moves, check). moves 는 [(src_rel, dst_rel)].
-    """
-    current = collect_all(raw_dir)
-    moves = [(src, dst) for src, dst in targets.items() if src != dst]
-
-    check = Check()
-    for src, dst in moves:
-        if src not in current:
-            check.errors.append(f"원본 파일이 없다: {src}")
-        if not dst or dst.startswith("/") or ".." in PurePosixPath(dst).parts:
-            check.errors.append(f"허용되지 않는 경로: {dst}")
-        if PurePosixPath(src).suffix.lower() != PurePosixPath(dst).suffix.lower():
-            check.errors.append(f"확장자를 바꿀 수 없다: {src} → {dst}")
-
-    moved = {src for src, _ in moves}
-    final_rels = [r for r in current if r not in moved] + [dst for _, dst in moves]
-
-    # 경로 충돌은 제외 폴더까지 **포함해서** 검사한다. 서로 다른 폴더의 동명 파일을 함께
-    # 제외하면 둘 다 `_excluded/<같은 이름>` 으로 가서 한 장이 조용히 덮어써진다.
-    counts: dict[str, int] = defaultdict(int)
-    for r in final_rels:
-        counts[r] += 1
-    for r, c in sorted(counts.items()):
-        if c > 1:
-            check.errors.append(f"같은 경로로 여러 파일이 간다: {r} ({c}개)")
-
-    # 반면 차분/강조 이름 규칙은 학습에 들어가는 것(=제외되지 않은 것)만 따진다.
-    name_check = check_flat_names(
-        [flat_name(r) for r in final_rels if not r.startswith(EXCLUDE_PREFIX)]
-    )
-    check.errors += name_check.errors
-    check.warnings += name_check.warnings
-    return moves, check
+def group_index(state: State, rel: str) -> int:
+    for i, g in enumerate(state.groups):
+        if rel in g["members"]:
+            return i
+    raise KeyError(rel)
 
 
-def remap_cache(raw_dir: Path, moves: list[tuple[str, str]]) -> None:
-    """리네임을 임베딩 캐시 키에 반영한다.
+def centroids(state: State, emb: dict[str, np.ndarray]) -> np.ndarray:
+    """그룹별 centroid(멤버 임베딩 평균을 L2 정규화). (G, D)."""
+    vecs = []
+    for g in state.groups:
+        v = np.mean([emb[m] for m in g["members"]], axis=0)
+        n = np.linalg.norm(v)
+        vecs.append(v / n if n > 0 else v)
+    return np.stack(vecs).astype(np.float32) if vecs else np.zeros((0, 1), np.float32)
 
-    파일 내용은 그대로이므로(이름만 바뀜) 다시 임베딩할 이유가 없다. 이걸 안 하면
-    적용할 때마다 데이터셋 전체가 재임베딩된다.
-    """
-    cache = cache_dir(raw_dir) / "embeddings.npz"
-    if not cache.exists() or not moves:
+
+def _representative(members: list[str], emb: dict[str, np.ndarray]) -> str:
+    """centroid 에 가장 가까운 멤버 (그룹 대표 썸네일)."""
+    if len(members) == 1:
+        return members[0]
+    c = np.mean([emb[m] for m in members], axis=0)
+    return max(members, key=lambda m: float(emb[m] @ c))
+
+
+EMPTY: frozenset = frozenset()
+
+
+def _forbid_map(state: State) -> dict[str, set]:
+    f: dict[str, set] = defaultdict(set)
+    for pair in state.cannot_link:
+        a, b = tuple(pair)
+        f[a].add(b)
+        f[b].add(a)
+    return f
+
+
+def _blocked(gi: dict, gj: dict, forbid: dict[str, set]) -> bool:
+    """두 그룹 사이에 cannot_link 가 하나라도 있으면 병합 후보에서 제외."""
+    mj = set(gj["members"])
+    return any(forbid.get(a, EMPTY) & mj for a in gi["members"])
+
+
+def candidate_pairs(state: State, emb: dict[str, np.ndarray], threshold: float,
+                    limit: int = 300) -> list[dict]:
+    """centroid 코사인 >= threshold 인 그룹 쌍 후보 (cannot_link 제외), 유사도 내림차순."""
+    n = len(state.groups)
+    if n < 2:
+        return []
+    C = centroids(state, emb)
+    sim = C @ C.T
+    forbid = _forbid_map(state)
+    out = []
+    for i in range(n):
+        gi = state.groups[i]
+        for j in range(i + 1, n):
+            s = float(sim[i, j])
+            if s < threshold:
+                continue
+            gj = state.groups[j]
+            if _blocked(gi, gj, forbid):
+                continue
+            out.append((s, i, j))
+    out.sort(key=lambda t: -t[0])
+    out = out[:limit]
+
+    cards = []
+    for s, i, j in out:
+        gi, gj = state.groups[i], state.groups[j]
+        cards.append({
+            "a": _representative(gi["members"], emb),
+            "b": _representative(gj["members"], emb),
+            "sim": s,
+            "size_a": len(gi["members"]), "size_b": len(gj["members"]),
+            "special_a": gi["special"], "special_b": gj["special"],
+        })
+    return cards
+
+
+def group_view(state: State, emb: dict[str, np.ndarray] | None) -> list[dict]:
+    """UI 표시용 그룹 목록. emb 있으면 대표 멤버를 centroid 기준으로 고른다."""
+    view = []
+    for i, g in enumerate(state.groups):
+        rep = _representative(g["members"], emb) if emb else g["members"][0]
+        view.append({
+            "id": i,
+            "rep": rep,
+            "members": g["members"],
+            "size": len(g["members"]),
+            "special": g["special"],
+        })
+    return view
+
+
+# ---------------------------------------------------------------------------
+# 액션 (모두 rel 기준 — 그룹 id 는 매 조회마다 바뀔 수 있으므로)
+# ---------------------------------------------------------------------------
+def _drop_cannot_within(state: State, members: set) -> None:
+    """같은 그룹 안으로 들어온 cannot_link 쌍은 무의미하므로 제거."""
+    state.cannot_link = {
+        p for p in state.cannot_link if not (set(p) <= members)
+    }
+
+
+def merge(state: State, rel_a: str, rel_b: str) -> None:
+    """rel_a 의 그룹과 rel_b 의 그룹을 합친다(사용자 명시 병합)."""
+    i, j = group_index(state, rel_a), group_index(state, rel_b)
+    if i == j:
         return
-    try:
-        blob = np.load(cache, allow_pickle=False)
-        table = dict(moves)
-        keys = [table.get(str(k), str(k)) for k in blob["keys"]]
-        np.savez(cache, keys=np.array(keys), sigs=blob["sigs"], emb=blob["emb"])
-    except Exception as exc:
-        print(f"[warn] 임베딩 캐시 갱신 실패(다음 실행 때 재임베딩): {exc}")
+    gi, gj = state.groups[i], state.groups[j]
+    merged = {"members": gi["members"] + gj["members"],
+              "special": gi["special"] or gj["special"]}
+    state.groups = [g for k, g in enumerate(state.groups) if k not in (i, j)]
+    state.groups.append(merged)
+    _drop_cannot_within(state, set(merged["members"]))
 
 
-def log_path(raw_dir: Path) -> Path:
-    return cache_dir(raw_dir) / "rename_log.json"
+def mark_different(state: State, rel_a: str, rel_b: str) -> None:
+    """rel_a 그룹과 rel_b 그룹은 동일 그룹이 아니라고 명시(cannot_link). 다른 그룹일 때만."""
+    i, j = group_index(state, rel_a), group_index(state, rel_b)
+    if i == j:
+        return
+    for a in state.groups[i]["members"]:
+        for b in state.groups[j]["members"]:
+            state.cannot_link.add(frozenset((a, b)))
 
 
-def _read_log(raw_dir: Path) -> dict:
-    p = log_path(raw_dir)
-    if not p.exists():
-        return {"version": 1, "dataset": raw_dir.name, "history": []}
-    return json.loads(p.read_text(encoding="utf-8"))
+def ungroup(state: State, rel: str) -> None:
+    """rel 이 속한 그룹을 싱글턴들로 해체(강조도 해제)."""
+    i = group_index(state, rel)
+    members = state.groups[i]["members"]
+    state.groups.pop(i)
+    for m in members:
+        state.groups.append({"members": [m], "special": False})
 
 
-def apply_moves(raw_dir: Path, moves: list[tuple[str, str]], *, record: bool = True) -> int:
-    """2단계 리네임으로 적용한다 (a→b, b→a 같은 스왑/순환 안전).
+def remove_member(state: State, rel: str) -> None:
+    """rel 을 자기 그룹에서 빼내 싱글턴으로. (그룹이 1장뿐이면 no-op)"""
+    i = group_index(state, rel)
+    g = state.groups[i]
+    if len(g["members"]) == 1:
+        return
+    g["members"] = [m for m in g["members"] if m != rel]
+    state.groups.append({"members": [rel], "special": False})
 
-    1) 모든 src 를 유니크한 임시 이름으로
-    2) 임시 → dst
+
+def set_special(state: State, rel: str, on: bool) -> None:
+    state.groups[group_index(state, rel)]["special"] = bool(on)
+
+
+def exclude(state: State, rel: str) -> None:
+    """rel 을 그룹에서 빼고 제외 목록으로. cannot_link 도 정리."""
+    i = group_index(state, rel)
+    g = state.groups[i]
+    g["members"] = [m for m in g["members"] if m != rel]
+    if not g["members"]:
+        state.groups.pop(i)
+    if rel not in state.excluded:
+        state.excluded.append(rel)
+    state.cannot_link = {p for p in state.cannot_link if rel not in p}
+
+
+def include(state: State, rel: str) -> None:
+    """제외를 취소하고 싱글턴 그룹으로 복귀."""
+    if rel in state.excluded:
+        state.excluded.remove(rel)
+        state.groups.append({"members": [rel], "special": False})
+
+
+# ---------------------------------------------------------------------------
+# 익스포트 → dataset/<name>/repeat_<N>/ 심볼릭 링크
+# ---------------------------------------------------------------------------
+def round_repeat(total: int, k: int, rounding: str) -> int:
+    """그룹 전체 반복수 total 을 k 로 나눈 개별 반복수(최소 1)."""
+    val = total / k
+    n = math.ceil(val) if rounding == "ceil" else (round(val) if rounding == "round" else math.floor(val))
+    return max(1, n)
+
+
+def plan_export(state: State, repeat: int, rounding: str) -> tuple[list[tuple[str, int]], dict]:
+    """반환: ([(rel, N)], stats). 제외 이미지는 빠진다. flat 이름 충돌은 stats['collisions'].
+
+    그룹 전체 반복수 합 = R(강조=2R). 그룹 크기 k 면 각 멤버 round(total/k).
     """
-    if not moves:
-        return 0
-    stamp = int(time.time())
-    tmp: list[tuple[Path, Path]] = []
-    for i, (src, dst) in enumerate(moves):
-        s = resolve_rel(raw_dir, src)
-        t = s.with_name(f".dedup_tmp_{stamp}_{i}{s.suffix}")
-        s.rename(t)
-        tmp.append((t, resolve_rel(raw_dir, dst)))
-    for t, dst_path in tmp:
-        dst_path.parent.mkdir(parents=True, exist_ok=True)
-        t.rename(dst_path)
-    remap_cache(raw_dir, moves)
+    assignments: list[tuple[str, int]] = []
+    n_groups = n_singletons = n_multi = n_special = 0
+    exset = set(state.excluded)
+    for g in state.groups:
+        members = [m for m in g["members"] if m not in exset]
+        if not members:
+            continue
+        k = len(members)
+        total = repeat * 2 if g["special"] else repeat
+        n = round_repeat(total, k, rounding)
+        for m in members:
+            assignments.append((m, n))
+        n_groups += 1
+        if k > 1:
+            n_multi += 1
+        else:
+            n_singletons += 1
+        if g["special"]:
+            n_special += 1
 
-    if record:
-        data = _read_log(raw_dir)
-        data["history"].append({"ts": stamp, "moves": [[s, d] for s, d in moves]})
-        log_path(raw_dir).write_text(
-            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-    return len(moves)
+    flats: dict[str, list[str]] = defaultdict(list)
+    for rel, _n in assignments:
+        flats[flat_name(rel)].append(rel)
+    collisions = {f: rels for f, rels in flats.items() if len(rels) > 1}
+
+    dist: dict[int, int] = defaultdict(int)
+    for _rel, n in assignments:
+        dist[n] += 1
+    stats = {
+        "images": len(assignments),
+        "groups": n_groups,
+        "singletons": n_singletons,
+        "multi": n_multi,
+        "special": n_special,
+        "excluded": len(exset),
+        "dist": dict(sorted(dist.items())),
+        "total_reps": sum(n for _rel, n in assignments),
+        "collisions": collisions,
+    }
+    return assignments, stats
 
 
-def undo_last(raw_dir: Path) -> tuple[int, str]:
-    """가장 최근 적용 배치를 되돌린다. 반환: (되돌린 수, 메시지)."""
-    data = _read_log(raw_dir)
-    if not data["history"]:
-        return 0, "되돌릴 기록이 없다."
-    batch = data["history"][-1]
-    reverse = [(d, s) for s, d in batch["moves"]]
+def _clear_repeat_dirs(out_dir: Path) -> None:
+    for sub in out_dir.iterdir():
+        if sub.is_dir() and re.fullmatch(r"repeat_\d+", sub.name):
+            for f in sub.iterdir():
+                if f.is_symlink() or f.is_file():
+                    f.unlink()
+            sub.rmdir()
 
-    missing = [d for d, _s in reverse if not resolve_rel(raw_dir, d).exists()]
-    if missing:
-        return 0, f"되돌릴 수 없다 — 적용 후 파일이 바뀌었다: {', '.join(missing[:3])}"
 
-    n = apply_moves(raw_dir, reverse, record=False)
-    data["history"].pop()
-    log_path(raw_dir).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(batch["ts"]))
-    return n, f"{ts} 배치 {n}건을 되돌렸다."
+def do_export(raw_dir: Path, state: State, name: str, repeat: int, rounding: str,
+              *, force: bool = False, absolute: bool = False) -> dict:
+    """dataset/<name>/repeat_<N>/ 에 상대 심볼릭 링크를 만든다. 반환: 결과 stats."""
+    assignments, stats = plan_export(state, repeat, rounding)
+    if not assignments:
+        raise ValueError("익스포트할 이미지가 없다(전부 제외됨?).")
+    if stats["collisions"]:
+        first = next(iter(stats["collisions"]))
+        raise ValueError(f"플래트닝 이름 충돌: {first} ({len(stats['collisions'])}건). 원시 파일명을 정리할 것.")
+
+    out_dir = DATASET_ROOT / name
+    if out_dir.exists():
+        has_repeat = any(re.fullmatch(r"repeat_\d+", p.name)
+                         for p in out_dir.iterdir() if p.is_dir())
+        if has_repeat and not force:
+            raise ValueError(f"이미 존재(force 필요): dataset/{name}")
+        if has_repeat:
+            _clear_repeat_dirs(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    created = 0
+    for rel, n in assignments:
+        sub = out_dir / f"repeat_{n}"
+        sub.mkdir(exist_ok=True)
+        link = sub / flat_name(rel)
+        src = resolve_rel(raw_dir, rel)
+        target = src if absolute else Path(os.path.relpath(src, sub))
+        if link.exists() or link.is_symlink():
+            link.unlink()
+        os.symlink(target, link)
+        created += 1
+
+    stats["created"] = created
+    stats["out_dir"] = str(out_dir)
+    stats["name"] = name
+    return stats

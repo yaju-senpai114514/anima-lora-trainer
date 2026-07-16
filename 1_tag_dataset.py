@@ -62,7 +62,7 @@ def list_images(folder: Path, recursive: bool = False) -> list[Path]:
 
 
 def has_repeat_subsets(folder: Path) -> bool:
-    """0_process_raw.py 가 만든 repeat_<N> 서브셋 구조인지."""
+    """0_dedup_raw.py 가 만든 repeat_<N> 서브셋 구조인지."""
     return any(p.is_dir() and p.name.startswith("repeat_") for p in folder.iterdir())
 
 
@@ -108,7 +108,7 @@ def main() -> int:
                     help="예측된 rating 태그(general/sensitive/...)를 trigger 다음에 삽입")
     ap.add_argument("--overwrite", action="store_true", help="기존 .txt 덮어쓰기")
     ap.add_argument("--recursive", action="store_true",
-                    help="하위 폴더까지 재귀 태깅 (0_process_raw.py 의 repeat_<N> 구조용)")
+                    help="하위 폴더까지 재귀 태깅 (0_dedup_raw.py 의 repeat_<N> 구조용)")
     ap.add_argument("--dry-run", action="store_true", help="파일 안 쓰고 결과만 출력")
     args = ap.parse_args()
 

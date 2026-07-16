@@ -16,15 +16,19 @@ dataset/*
 !dataset/trigger_tag/**
 
 dataset_raw/*
-!dataset_raw/PROCESS_RAW.md
+!dataset_raw/README.md
 
-# 0a_dedup_raw.py 캐시 (DINOv2 임베딩 / 썸네일 / undo 로그)
+# 0_dedup_raw.py 캐시 (DINOv2 임베딩 / 썸네일 / state.json 그룹핑 현황)
 .dedup/
 
 # 로컬 전용 설정 (모델 경로/하이퍼파라미터). 예시는 *.example 로 제공된다.
 config.env
 config_model.env
 config.*.env
+
+# 코드네임 특정 일회성 스크립트 — 공개 저장소에서 의도적으로 제외 (로컬 전용)
+anneal_r6r6d0.sh
+run_rurudo.sh
 
 # Output directory
 output/*

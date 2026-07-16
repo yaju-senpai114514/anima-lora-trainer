@@ -185,7 +185,7 @@ def main() -> int:
             if args.batch_size is None else f"{args.batch_size} (toml 에 고정 → GPU 수 바꾸면 재생성 필요)"
         print(f"  images={n_img}  captions={n_txt}  resolution={args.resolution}  "
               f"repeats={subsets[0][1]}  batch_size: {bs_note}")
-    # 반복수 반영 총 학습이미지 + 배치별 에폭당 스텝수 (0_process_raw 와 동일 규약)
+    # 반복수 반영 총 학습이미지 + 배치별 에폭당 스텝수 (0_dedup_raw 와 동일 규약)
     # 총 스텝 = 이 값 × epochs. enable_bucket 시 버킷 반올림으로 실제 스텝은 조금 더 클 수 있음.
     def _subset_dir(image_dir: str) -> Path:
         tail = Path(image_dir).name
