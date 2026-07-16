@@ -23,7 +23,7 @@ Usage: ./3_run_training_4gpu.sh <trigger>
 
   <trigger>  학습할 데이터셋/설정 이름. 다음 두 파일이 있어야 한다:
                - config.<trigger>.env    (LoRA/학습 하이퍼파라미터)
-               - dataset/<trigger>.toml  (dataset_config; 2_make_config.py 산출)
+               - dataset/<trigger>.toml  (dataset_config; 0_dataset_server.py 웹 UI 산출)
              모델 경로는 config_model.env 에서 공통으로 읽는다.
 
              config.<trigger>.env 의 선택 변수(설정 시 사용, 1gpu 스크립트와 공통 API):
@@ -32,13 +32,13 @@ Usage: ./3_run_training_4gpu.sh <trigger>
                - OUT_DIR        출력 디렉토리 오버라이드(절대/REPO상대). 미설정 시 기본 규칙
 
   이 스크립트는 4-GPU 전용이다:
-               - GPU당 배치 = toml 의 batch_size (--train_batch_size 가 아님!)
-               - toml batch_size × 4 == config 의 BATCH_SIZE(글로벌) 를 검증한다.
-               - 글로벌 4 로 돌리려면:  2_make_config.py <trigger> --batch-size 1 --force
+               - GPU당 배치 = BATCH_SIZE(글로벌)/4 을 --train_batch_size 로 넘긴다.
+               - toml 생성기(웹 UI)는 batch_size 를 적지 않는다. 구형/수동 toml 에
+                 있으면 sd-scripts 가 그걸 우선하므로 × 4 == BATCH_SIZE 를 검증한다.
 
   예:  ./3_run_training_4gpu.sh mychar
 
-  파이프라인: 0_dedup_raw → 1_tag_dataset → 2_make_config → 3_run_training
+  파이프라인: 0_dataset_server(웹 UI: dedup → 태깅 → toml) → 3_run_training
 EOF
 }
 
@@ -84,7 +84,7 @@ fi
 if [ ! -f "$TOML" ]; then
   echo "[error] dataset_config 없음: $TOML" >&2
   echo "        (config 의 DATASET_TOML 로 커스텀 지정 가능; 미지정 시 dataset/${TRIGGER}.toml)" >&2
-  echo "        먼저: uv run python 2_make_config.py ${TRIGGER}" >&2
+  echo "        먼저 웹 UI 에서 toml 생성: uv run python 0_dataset_server.py" >&2
   exit 1
 fi
 
@@ -147,9 +147,9 @@ if [ $(( LOCAL_BATCH * NUM_GPUS )) -ne "$BATCH_SIZE" ]; then
   echo "        --train_batch_size 는 무시됩니다 (로그/메타데이터에만 반영)." >&2
   echo "" >&2
   echo "        → toml 에서 batch_size 를 빼면 GPU 수와 무관하게 맞습니다 (권장):" >&2
-  echo "          uv run python 2_make_config.py ${TRIGGER} --force" >&2
-  echo "        → toml 에 고정해야 한다면 GPU당 배치로 맞추세요:" >&2
-  echo "          uv run python 2_make_config.py ${TRIGGER} --batch-size ${WANT} --force" >&2
+  echo "          (0_dataset_server.py 웹 UI 의 toml 생성 — batch_size 를 적지 않는다)" >&2
+  echo "        → toml 에 꼭 고정해야 한다면 batch_size = ${WANT} 로 직접 수정하세요" >&2
+  echo "          (toml 생성기는 batch_size 를 아예 쓰지 않습니다)." >&2
   exit 1
 fi
 

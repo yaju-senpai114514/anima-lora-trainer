@@ -1,0 +1,724 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dataset — dedup · 태깅 · toml</title>
+<style>
+  :root {
+    --bg:#0f1115; --panel:#171a21; --panel2:#1e222b; --line:#2b313d;
+    --fg:#e6e9ef; --dim:#98a2b3; --accent:#5b9dff; --ok:#3ecf8e; --warn:#f5a524; --err:#f45b69;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:14px/1.5 ui-sans-serif,system-ui,"Pretendard","Apple SD Gothic Neo",sans-serif; }
+  header { position:sticky; top:0; z-index:10; background:var(--panel); border-bottom:1px solid var(--line);
+           padding:12px 20px; display:flex; gap:14px; align-items:center; flex-wrap:wrap; }
+  h1 { font-size:15px; margin:0; font-weight:600; }
+  .meta { color:var(--dim); font-size:12px; }
+  .spacer { flex:1; }
+  button { background:var(--panel2); color:var(--fg); border:1px solid var(--line); border-radius:6px;
+           padding:6px 12px; cursor:pointer; font-size:13px; }
+  button:hover:not(:disabled) { border-color:var(--accent); }
+  button:disabled { opacity:.4; cursor:default; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#08101f; font-weight:600; }
+  button.ok { border-color:var(--ok); color:var(--ok); }
+  button.danger:hover { border-color:var(--err); color:var(--err); }
+  main { padding:20px; max-width:1600px; margin:0 auto; }
+  section { margin-bottom:26px; }
+  .sechead { display:flex; gap:10px; align-items:center; margin-bottom:12px; }
+  .sechead h2 { font-size:14px; margin:0; font-weight:600; }
+  .sechead .tiny { color:var(--dim); }
+
+  /* 후보 쌍 */
+  .cand { background:var(--panel); border:1px solid var(--line); border-radius:10px;
+          display:flex; gap:12px; align-items:center; padding:12px; margin-bottom:10px; }
+  .cand.hot { border-color:var(--accent); }
+  .side { display:flex; gap:8px; align-items:center; }
+  .simbig { font-family:ui-monospace,monospace; font-size:18px; font-weight:600; min-width:64px; text-align:center; }
+  .vs { color:var(--dim); font-size:12px; }
+  .cand .acts { display:flex; gap:6px; margin-left:auto; }
+
+  /* 그룹 / 그리드 */
+  .group { background:var(--panel); border:1px solid var(--line); border-radius:10px;
+           margin-bottom:14px; overflow:hidden; }
+  .group.special { border-color:var(--warn); }
+  .ghead { display:flex; gap:10px; align-items:center; padding:10px 14px;
+           background:var(--panel2); border-bottom:1px solid var(--line); flex-wrap:wrap; }
+  .tiles { display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:10px; padding:12px; }
+  .tile { background:var(--panel2); border:1px solid var(--line); border-radius:8px; padding:7px;
+          display:flex; flex-direction:column; gap:5px; }
+  .tile.excl { opacity:.5; border-color:var(--err); }
+  .thumb { width:100%; aspect-ratio:1; object-fit:contain; background:#0a0c10; border-radius:4px; cursor:zoom-in; }
+  .mini { width:64px; height:64px; object-fit:cover; border-radius:6px; background:#0a0c10; cursor:zoom-in; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(130px,1fr)); gap:10px; }
+  .selectable { position:relative; }
+  .selectable.sel .thumb { outline:3px solid var(--accent); outline-offset:-3px; }
+  select, input[type=number], input[type=text] { background:var(--panel2); color:var(--fg);
+           border:1px solid var(--line); border-radius:6px; padding:5px 8px; font-size:13px; }
+  input[type=number] { width:70px; font-family:ui-monospace,monospace; }
+  .bar { height:6px; background:var(--panel2); border-radius:99px; overflow:hidden; margin:10px 0; }
+  .bar > div { height:100%; background:var(--accent); transition:width .2s; }
+  .center { text-align:center; padding:48px 20px; }
+  .badge { font-size:10px; padding:1px 6px; border-radius:99px; border:1px solid var(--line); color:var(--dim); }
+  .badge.warn { color:var(--warn); border-color:var(--warn); }
+  .badge.ok { color:var(--ok); border-color:var(--ok); }
+  .tiny { font-size:11px; color:var(--dim); }
+  dialog { background:var(--panel); color:var(--fg); border:1px solid var(--line); border-radius:10px;
+           padding:0; max-width:720px; width:90vw; }
+  dialog::backdrop { background:rgba(0,0,0,.7); }
+  .dlg-body { padding:18px; max-height:66vh; overflow:auto; }
+  .dlg-foot { padding:12px 16px; border-top:1px solid var(--line); display:flex; gap:8px; justify-content:flex-end; }
+  .field { display:flex; gap:10px; align-items:center; margin-bottom:12px; }
+  .field label { min-width:130px; color:var(--dim); font-size:13px; }
+  .msg { padding:8px 12px; border-radius:6px; margin-bottom:8px; font-size:12px; }
+  .msg.err { background:rgba(244,91,105,.12); color:var(--err); }
+  .msg.ok { background:rgba(62,207,142,.12); color:var(--ok); }
+  /* 라이트박스는 일반 다이얼로그의 720px/66vh 제한을 풀고 뷰포트에 fit */
+  #lightbox { max-width:none; width:auto; }
+  #lightbox .dlg-body { padding:8px; max-height:none; overflow:hidden; }
+  #lightbox img { max-width:94vw; max-height:88vh; display:block; margin:auto; object-fit:contain; }
+  #toast { position:fixed; bottom:20px; left:50%; transform:translateX(-50%); background:var(--panel2);
+           border:1px solid var(--line); border-radius:8px; padding:10px 16px; display:none; z-index:50; }
+  kbd { font-family:ui-monospace,monospace; font-size:11px; background:var(--panel2);
+        border:1px solid var(--line); border-radius:4px; padding:0 5px; }
+  .sideinfo { display:flex; flex-direction:column; gap:2px; align-items:flex-start; }
+  .sideinfo button { padding:2px 8px; font-size:11px; }
+  .tiny.hi { color:var(--ok); font-weight:600; }
+  .tile .row button { padding:4px 6px; font-size:12px; }
+  #tabs { display:flex; gap:4px; }
+  .tab { background:transparent; }
+  .tab.active { border-color:var(--accent); color:var(--accent); font-weight:600; }
+  textarea.cap { background:var(--panel2); color:var(--fg); border:1px solid var(--line);
+        border-radius:6px; padding:6px 8px; font:12px/1.4 inherit; width:100%;
+        resize:vertical; min-height:74px; }
+  pre.toml { background:#0a0c10; border:1px solid var(--line); border-radius:6px;
+        padding:10px 12px; font:12px/1.5 ui-monospace,monospace; overflow:auto; max-height:300px; }
+  #cfg-editor { background:#0a0c10; color:var(--fg); border:1px solid var(--line); border-radius:6px;
+        padding:10px 12px; font:12px/1.5 ui-monospace,monospace; flex:1; min-height:240px;
+        resize:vertical; white-space:pre; }
+</style>
+</head>
+<body>
+<header>
+  <h1>dataset</h1>
+  <nav id="tabs">
+    <button class="tab active" data-v="raw">원시 dedup</button>
+    <button class="tab" data-v="proc">데이터셋</button>
+  </nav>
+  <span id="rawctl" style="display:flex;gap:14px;align-items:center;flex-wrap:wrap">
+    <select id="ds" title="dataset_raw/ 의 원시 데이터셋"></select>
+    <label class="tiny">임계값
+      <input type="number" id="thr" step="0.01" min="0.40" max="0.99" title="centroid 코사인 유사도">
+    </label>
+    <button id="embed" title="DINOv2 임베딩을 다시 계산한다">임베딩 재계산</button>
+  </span>
+  <span class="meta" id="meta">로딩…</span>
+  <span class="spacer"></span>
+  <button id="export" class="primary">익스포트…</button>
+</header>
+<main id="root"></main>
+
+<dialog id="export-dlg">
+  <div class="dlg-body">
+    <h2 style="margin:0 0 14px">심볼릭 링크 데이터셋 익스포트</h2>
+    <div class="field"><label>이름 (dataset/)</label>
+      <input type="text" id="ex-name" style="flex:1"></div>
+    <div class="field"><label>repeat (R)</label>
+      <input type="number" id="ex-repeat" value="10" min="1">
+      <span class="tiny">그룹 합 R · 강조 그룹 2R · 그룹 크기 k 면 각 round(합/k)</span></div>
+    <div class="field"><label>rounding</label>
+      <select id="ex-round">
+        <option value="ceil">ceil (올림)</option>
+        <option value="round">round (반올림)</option>
+        <option value="floor">floor (내림)</option>
+      </select></div>
+    <div class="field"><label>덮어쓰기</label>
+      <input type="checkbox" id="ex-force"><span class="tiny">기존 dataset/&lt;이름&gt;/repeat_* 을 지우고 새로 쓴다</span></div>
+    <div id="ex-preview"></div>
+  </div>
+  <div class="dlg-foot">
+    <button onclick="document.getElementById('export-dlg').close()">닫기</button>
+    <button id="ex-dry">미리보기</button>
+    <button class="primary" id="ex-run">익스포트 실행</button>
+  </div>
+</dialog>
+<dialog id="tag-dlg">
+  <div class="dlg-body">
+    <h2 style="margin:0 0 14px">WD14 태깅 — <span id="tag-ds"></span></h2>
+    <div class="field"><label>trigger</label>
+      <input type="text" id="tag-trigger" style="flex:1" placeholder="@mychar"></div>
+    <div class="field"><label>general threshold</label>
+      <input type="number" id="tag-gth" value="0.35" step="0.05" min="0" max="1"></div>
+    <div class="field"><label>character threshold</label>
+      <input type="number" id="tag-cth" value="0.85" step="0.05" min="0" max="1"></div>
+    <div class="field"><label>rating 포함</label>
+      <input type="checkbox" id="tag-rating">
+      <span class="tiny">rating 태그(general/sensitive…)를 trigger 다음에 삽입 → toml 은 keep_tokens=2 로</span></div>
+    <div class="field"><label>덮어쓰기</label>
+      <input type="checkbox" id="tag-overwrite">
+      <span class="tiny">기존 .txt 도 다시 쓴다 (WD 추론은 캐시돼 빠르다)</span></div>
+    <p class="tiny">blacklist.txt 의 태그는 자동 제거되고 trigger 가 항상 첫 토큰이 된다.
+      repeat_&lt;N&gt; 구조는 자동으로 하위까지 태깅한다.</p>
+  </div>
+  <div class="dlg-foot">
+    <button onclick="document.getElementById('tag-dlg').close()">닫기</button>
+    <button class="primary" id="tag-run">태깅 시작</button>
+  </div>
+</dialog>
+
+<dialog id="cfg-dlg">
+  <div class="dlg-body">
+    <h2 style="margin:0 0 14px">toml 생성/편집 — <span id="cfg-ds"></span></h2>
+    <div class="field"><label>해상도</label>
+      <input type="text" id="cfg-res" value="1024" style="width:110px">
+      <span class="tiny">'1024' 또는 '1024,768'</span></div>
+    <div class="field" id="cfg-repeats-row"><label>num_repeats</label>
+      <input type="number" id="cfg-repeats" value="2" min="1">
+      <span class="tiny">평면 데이터셋용 (repeat_&lt;N&gt; 구조면 폴더 값이 쓰인다)</span></div>
+    <div class="field"><label>keep_tokens</label>
+      <input type="number" id="cfg-keep" value="1" min="0">
+      <span class="tiny">trigger 만이면 1 · rating 포함 태깅이면 2 (자동 제안)</span></div>
+    <div class="field"><label>shuffle_caption</label><input type="checkbox" id="cfg-shuffle" checked></div>
+    <div class="field"><label>enable_bucket</label><input type="checkbox" id="cfg-bucket" checked></div>
+    <div class="field"><label>bucket_no_upscale</label><input type="checkbox" id="cfg-noup"></div>
+    <div class="field"><label>bucket reso</label>
+      <input type="number" id="cfg-minb" value="512"> ~ <input type="number" id="cfg-maxb" value="1536"></div>
+    <p class="tiny">batch_size 는 적지 않는다 — 학습 스크립트의 --train_batch_size 가 정하므로
+      같은 toml 로 1/2/4 GPU 를 다 돌린다.</p>
+    <div id="cfg-preview"></div>
+    <div class="field" style="align-items:flex-start"><label>toml (직접 수정 가능)</label>
+      <textarea id="cfg-editor" spellcheck="false"
+        placeholder="[옵션 → 미리보기]로 생성하거나, 여기에 직접 작성/수정한다 (멀티해상도 블록 등)"></textarea></div>
+  </div>
+  <div class="dlg-foot">
+    <button onclick="document.getElementById('cfg-dlg').close()">닫기</button>
+    <button id="cfg-dry" title="위 옵션으로 toml 을 생성해 편집기에 채운다 (파일은 안 쓴다)">옵션 → 미리보기</button>
+    <button class="primary" id="cfg-save" title="편집기 내용을 그대로 저장한다 (toml 파싱 검증)">저장</button>
+  </div>
+</dialog>
+
+<dialog id="lightbox"><div class="dlg-body"><img id="lightbox-img" title="클릭=다음 (←/→ 탐색)">
+  <div id="lightbox-cap" class="tiny" style="text-align:center;padding:6px 4px 2px"></div></div></dialog>
+<div id="toast"></div>
+
+<script>
+let DATA = null;
+let DS = null;
+let THR = 0.85;
+let PICK = null;   // {rel} 그룹/싱글턴에서 "다르다/병합" 대상으로 찍어둔 것
+let VIEW = 'raw';  // 'raw'(원시 dedup) | 'proc'(dataset/ 태깅·toml)
+let PROC = null;   // /api/processed 응답 캐시
+let OPENCAPS = new Set();  // 캡션 그리드가 열린 데이터셋 이름
+let TAGDS = null, CFGDS = null;  // 다이얼로그 대상 데이터셋
+
+const esc = s => String(s).replace(/[&<>"']/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const toast = m => { const t = document.getElementById('toast');
+  t.textContent = m; t.style.display='block'; clearTimeout(t._h);
+  t._h = setTimeout(()=>t.style.display='none', 3000); };
+const setMeta = t => document.getElementById('meta').textContent = t;
+const setRoot = h => document.getElementById('root').innerHTML = h;
+const kb = b => b >= 1048576 ? (b/1048576).toFixed(1)+'MB' : (b/1024).toFixed(0)+'KB';
+const thumb = (rel, s) => `/thumb?ds=${encodeURIComponent(DS)}&rel=${encodeURIComponent(rel)}${s?`&s=${s}`:''}`;
+
+// -- 탭 (원시 dedup / 데이터셋) ----------------------------------------------
+function setTab(v) {
+  VIEW = v;
+  document.querySelectorAll('#tabs .tab').forEach(b => b.classList.toggle('active', b.dataset.v === v));
+  document.getElementById('rawctl').style.display = v === 'raw' ? 'flex' : 'none';
+  document.getElementById('export').style.display = v === 'raw' ? '' : 'none';
+}
+function setView(v) { setTab(v); if (v === 'raw') load(); else loadProc(); }
+document.querySelectorAll('#tabs .tab').forEach(b => b.onclick = () => setView(b.dataset.v));
+
+async function boot() {
+  const d = await (await fetch('/api/datasets')).json();
+  if (d.error) return setRoot(`<div class="msg err">${esc(d.error)}</div>`);
+  const sel = document.getElementById('ds');
+  sel.innerHTML = d.datasets.map(x =>
+    `<option value="${esc(x.name)}">${esc(x.name)} · ${x.images}장${
+      x.pending ? ` · 임베딩 ${x.pending}장 필요` : ''}</option>`).join('');
+  DS = d.datasets.some(x => x.name === d.default) ? d.default : (d.datasets[0] || {}).name;
+  sel.value = DS;
+  THR = d.threshold;
+  document.getElementById('thr').value = THR.toFixed(2);
+  const j = await (await fetch('/api/job')).json();
+  if (j.running) {
+    if (j.kind === 'tag') setTab('proc');
+    else { DS = j.dataset; sel.value = DS; }
+    return poll();
+  }
+  await load();
+}
+
+async function load() {
+  if (!DS) return setRoot('<p class="tiny">dataset_raw/ 에 원시 데이터셋이 없다.</p>');
+  setMeta('불러오는 중…');
+  PICK = null;
+  const r = await fetch(`/api/state?ds=${encodeURIComponent(DS)}&threshold=${THR}`);
+  DATA = await r.json();
+  if (DATA.error) { setRoot(`<div class="msg err">${esc(DATA.error)}</div>`); setMeta(DS); return; }
+  if (DATA.need_embed) return renderNeedEmbed();
+  setMeta(`이미지 ${DATA.total_images}장 · 그룹 ${DATA.n_groups}`
+    + ` (묶임 ${DATA.n_multi} · 싱글턴 ${DATA.n_singletons})`
+    + ` · 강조 ${DATA.n_special} · 제외 ${DATA.n_excluded}`
+    + (DATA.n_cannot_link ? ` · 다름 ${DATA.n_cannot_link}` : ''));
+  render();
+}
+
+function renderNeedEmbed() {
+  setMeta(`이미지 ${DATA.total_images}장`);
+  setRoot(`<div class="center">
+    <p>이 데이터셋은 아직 DINOv2 임베딩이 없다 — <b>${DATA.pending}장</b> 계산이 필요하다.</p>
+    <p class="tiny">GPU 로 수십 초 걸린다. 결과는 캐시된다.</p>
+    <button class="primary" onclick="startEmbed(false)">DINOv2 임베딩 시작</button>
+  </div>`);
+}
+
+async function startEmbed(refresh) {
+  const res = await (await fetch('/api/embed', { method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ dataset: DS, refresh }) })).json();
+  if (res.error) return toast(res.error);
+  poll();
+}
+
+async function poll() {
+  const j = await (await fetch('/api/job')).json();
+  const label = j.kind === 'tag' ? '태깅' : '임베딩';
+  if (j.error) return setRoot(`<div class="msg err">${label} 실패: ${esc(j.error)}</div>`);
+  if (j.running) {
+    const loading = j.stage === 'model';
+    const model = j.kind === 'tag' ? 'WD14' : 'DINOv2';
+    const pct = j.total ? Math.round(j.done / j.total * 100) : 0;
+    setMeta(loading ? `${model} 모델 로딩 중…` : `${label} 중… ${j.done}/${j.total}`);
+    setRoot(`<div class="center">
+      <p>${loading ? `${model} 모델을 올리는 중` : `${model} ${label} 중`} — ${esc(j.dataset)}</p>
+      ${loading ? '<p class="tiny">첫 실행은 모델 로딩에 수 초 걸린다.</p>'
+        : `<div class="bar" style="max-width:420px;margin:12px auto"><div style="width:${pct}%"></div></div>
+           <p class="tiny">${j.done} / ${j.total} (${pct}%)</p>`}
+    </div>`);
+    setTimeout(poll, 500);
+    return;
+  }
+  if (j.summary) toast(j.summary);
+  if (j.kind === 'tag') { setTab('proc'); await loadProc(); }
+  else { setTab('raw'); await load(); }
+}
+
+// -- 액션 (전부 서버 왕복 후 재로딩) ------------------------------------------
+async function act(path, payload) {
+  const res = await (await fetch(path, { method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ dataset: DS, ...payload }) })).json();
+  if (res.error) { toast(res.error); return null; }
+  return res;
+}
+const gid = id => DATA.groups.find(g => g.id === id);
+async function merge(a, b)      { if (await act('/api/merge', {a, b}))      await load(); }
+async function different(a, b)  { if (await act('/api/different', {a, b}))  await load(); }
+async function ungroup(rel)     { if (await act('/api/ungroup', {rel}))     await load(); }
+async function removeMember(rel){ if (await act('/api/remove-member',{rel}))await load(); }
+async function exclude(rel)     { if (await act('/api/exclude', {rel}))     await load(); }
+async function include(rel)     { if (await act('/api/include', {rel}))     await load(); }
+async function special(rel, on) { if (await act('/api/special', {rel, on})) await load(); }
+
+/* 그룹/싱글턴에서 대표 썸네일을 찍으면 PICK 에 담고, 두 번째를 찍으면 액션 바를 띄운다.
+   같은 걸 다시 찍으면 해제. */
+function pick(rep) {
+  if (PICK && PICK.rel === rep) { PICK = null; render(); return; }
+  if (!PICK) { PICK = { rel: rep }; render(); return; }
+  // 두 번째 선택 → 확인 바가 뜬 상태로 render (아래 pickbar)
+  PICK.other = rep; render();
+}
+function clearPick() { PICK = null; render(); }
+
+/* 후보 쌍의 한쪽: 썸네일 + 해상도/파일크기(더 큰 쪽 강조) + 제외 버튼.
+   차분 정리의 핵심 판단(어느 쪽을 남길까)을 카드 안에서 끝내기 위한 것. */
+function candSide(rel, gsize, special, info, other) {
+  info = info || {w:0, h:0, bytes:0};
+  other = other || {w:0, h:0, bytes:0};
+  const area = info.w * info.h, otherArea = other.w * other.h;
+  const resCls = area && otherArea && area > otherArea ? 'hi' : '';
+  const byteCls = info.bytes && other.bytes && info.bytes > other.bytes ? 'hi' : '';
+  return `<div class="side">
+    <img class="mini" src="${thumb(rel,120)}" onclick="zoomAt(${lbAdd(fullUrl(rel), rel)})">
+    <div class="sideinfo">
+      <span>${gsize>1?`<span class="badge">그룹 ${gsize}</span>`:''}${special?'<span class="badge warn">강조</span>':''}</span>
+      <span class="tiny ${resCls}" title="픽셀 해상도">${info.w ? `${info.w}×${info.h}` : '–'}</span>
+      <span class="tiny ${byteCls}" title="파일 크기">${info.bytes ? kb(info.bytes) : '–'}</span>
+      <button class="danger" onclick="exclude('${esc(rel)}')"
+              title="이 이미지를 익스포트에서 제외 (그룹이면 대표 이미지만)">제외</button>
+    </div>
+  </div>`;
+}
+
+function render() {
+  const root = document.getElementById('root');
+  LBLIST = []; LBIDX = -1;  // 라이트박스 탐색 리스트를 표시 순서대로 다시 등록
+  const cands = DATA.candidates || [];
+  const multi = DATA.groups.filter(g => g.size > 1);
+  const singles = DATA.groups.filter(g => g.size === 1);
+  let html = '';
+
+  // 수동 병합/다름 확인 바 (그룹 대표 두 개를 찍었을 때)
+  if (PICK && PICK.other) {
+    html += `<div class="cand hot" style="position:sticky;top:64px;z-index:5">
+      <div class="side"><img class="mini" src="${thumb(PICK.rel,120)}"></div>
+      <span class="vs">선택한 둘을</span>
+      <div class="side"><img class="mini" src="${thumb(PICK.other,120)}"></div>
+      <div class="acts">
+        <button class="ok" onclick="merge('${esc(PICK.rel)}','${esc(PICK.other)}')">병합</button>
+        <button class="danger" onclick="different('${esc(PICK.rel)}','${esc(PICK.other)}')">다르다</button>
+        <button onclick="clearPick()">취소</button>
+      </div></div>`;
+  } else if (PICK) {
+    html += `<div class="msg ok">기준 이미지 선택됨 — 병합/구분할 다른 그룹의 대표를 하나 더 찍으세요.
+      <button onclick="clearPick()" style="margin-left:8px">취소</button></div>`;
+  }
+
+  // 1) 후보 쌍
+  html += `<section><div class="sechead"><h2>후보 쌍</h2>
+    <span class="tiny">임계값 ${THR.toFixed(2)} 이상 · ${cands.length}쌍 ·
+    <kbd>병합</kbd> 같은 그림 / <kbd>다르다</kbd> 별개(다시 안 뜸) /
+    <kbd>제외</kbd> 한쪽 버리기 — 해상도·용량이 큰 쪽이 <span class="hi" style="color:var(--ok);font-weight:600">초록</span></span></div>`;
+  if (!cands.length) {
+    html += `<p class="tiny">이 임계값에서는 후보가 없다. 위 임계값을 낮추면 더 뜬다.</p>`;
+  }
+  for (const c of cands) {
+    html += `<div class="cand">
+      <span class="simbig">${(c.sim*100).toFixed(1)}%</span>
+      ${candSide(c.a, c.size_a, c.special_a, c.a_info, c.b_info)}
+      <span class="vs">~</span>
+      ${candSide(c.b, c.size_b, c.special_b, c.b_info, c.a_info)}
+      <div class="acts">
+        <button class="ok" onclick="merge('${esc(c.a)}','${esc(c.b)}')">병합</button>
+        <button class="danger" onclick="different('${esc(c.a)}','${esc(c.b)}')">다르다</button>
+      </div></div>`;
+  }
+  html += `</section>`;
+
+  // 2) 묶인 그룹
+  html += `<section><div class="sechead"><h2>묶인 그룹</h2>
+    <span class="tiny">${multi.length}개 · 그룹 전체 반복수 합 R (강조 2R)</span></div>`;
+  if (!multi.length) html += `<p class="tiny">아직 병합된 그룹이 없다.</p>`;
+  for (const g of multi) html += groupCard(g);
+  html += `</section>`;
+
+  // 3) 개별 이미지(싱글턴)
+  html += `<section><div class="sechead"><h2>개별 이미지</h2>
+    <span class="tiny">${singles.length}장 · 썸네일 클릭=미리보기(<kbd>←</kbd>/<kbd>→</kbd> 탐색) ·
+    <kbd>선택</kbd> 두 개를 찍으면 병합/구분 확인 바</span></div>
+    <div class="grid">`;
+  for (const g of singles) {
+    const m = g.members[0];
+    const picked = PICK && (PICK.rel === g.rep || PICK.other === g.rep);
+    html += `<div class="tile selectable ${picked?'sel':''}">
+      <img class="thumb" loading="lazy" src="${thumb(m.rel)}" onclick="zoomAt(${lbAdd(fullUrl(m.rel), m.rel)})"
+           title="${esc(m.rel)}&#10;클릭=미리보기 (←/→ 탐색)">
+      <div class="tiny" style="display:flex;gap:6px;align-items:center">
+        ${g.special?'<span class="badge warn">강조</span>':''}
+        <span class="spacer" style="flex:1"></span>${m.w ? `${m.w}×${m.h} · ` : ''}${kb(m.bytes)}</div>
+      <div class="row" style="display:flex;gap:5px">
+        <button style="flex:1" class="${picked?'ok':''}" onclick="pick('${esc(g.rep)}')"
+                title="병합/구분 기준으로 선택 — 두 개를 선택하면 상단에 확인 바가 뜬다">${picked?'선택됨':'선택'}</button>
+        <button onclick="special('${esc(g.rep)}',${!g.special})">${g.special?'강조 해제':'강조'}</button>
+        <button class="danger" onclick="exclude('${esc(g.rep)}')">제외</button>
+      </div></div>`;
+  }
+  html += `</div></section>`;
+
+  // 4) 제외됨
+  if (DATA.excluded.length) {
+    html += `<section><div class="sechead"><h2>제외됨</h2>
+      <span class="tiny">${DATA.excluded.length}장 · 익스포트에서 빠진다</span></div><div class="grid">`;
+    for (const e of DATA.excluded) {
+      html += `<div class="tile excl">
+        <img class="thumb" loading="lazy" src="${thumb(e.rel)}" onclick="zoomAt(${lbAdd(fullUrl(e.rel), e.rel)})">
+        <div class="tiny">${esc(e.name)}</div>
+        <button onclick="include('${esc(e.rel)}')">복구</button></div>`;
+    }
+    html += `</div></section>`;
+  }
+
+  root.innerHTML = html;
+}
+
+function groupCard(g) {
+  const picked = PICK && (PICK.rel === g.rep || PICK.other === g.rep);
+  const idxs = g.members.map(m => lbAdd(fullUrl(m.rel), m.rel));
+  const repAt = g.members.findIndex(m => m.rel === g.rep);
+  const repIdx = idxs[repAt >= 0 ? repAt : 0];
+  let h = `<div class="group ${g.special?'special':''}">
+    <div class="ghead">
+      <img class="mini" src="${thumb(g.rep,120)}" onclick="zoomAt(${repIdx})"
+           style="${picked?'outline:3px solid var(--accent);outline-offset:-3px':''}"
+           title="대표 — 클릭=미리보기 (←/→ 탐색)">
+      <span class="tiny">그룹 ${g.size}장</span>
+      ${g.special?'<span class="badge warn">강조 (2R)</span>':''}
+      <span class="spacer"></span>
+      <button class="${picked?'ok':''}" onclick="pick('${esc(g.rep)}')"
+              title="병합/구분 기준으로 선택 — 두 개를 선택하면 상단에 확인 바가 뜬다">${picked?'선택됨':'선택'}</button>
+      <button onclick="special('${esc(g.rep)}',${!g.special})">${g.special?'강조 해제':'강조(2R)'}</button>
+      <button onclick="ungroup('${esc(g.rep)}')">그룹 해체</button>
+    </div><div class="tiles">`;
+  g.members.forEach((m, k) => {
+    h += `<div class="tile">
+      <img class="thumb" loading="lazy" src="${thumb(m.rel)}" onclick="zoomAt(${idxs[k]})"
+           title="클릭=미리보기 (←/→ 탐색)">
+      <div class="tiny" style="word-break:break-all" title="${esc(m.rel)}">${esc(m.rel)}</div>
+      <div class="tiny">${m.w ? `${m.w}×${m.h}` : '–'} · ${kb(m.bytes)}</div>
+      <div class="row" style="display:flex;gap:5px">
+        <button style="flex:1" onclick="removeMember('${esc(m.rel)}')" title="이 이미지를 그룹에서 빼 싱글턴으로">분리</button>
+        <button class="danger" onclick="exclude('${esc(m.rel)}')">제외</button>
+      </div></div>`;
+  });
+  return h + `</div></div>`;
+}
+
+/* 라이트박스 — 현재 뷰의 이미지들을 순서 리스트(LBLIST)로 모아 ←/→ 로 탐색한다.
+   render()/renderProc() 가 리스트를 리셋하고, 각 썸네일이 lbAdd() 로 자리를 등록한다. */
+let LBLIST = [], LBIDX = -1;
+const fullUrl = rel => `/full?ds=${encodeURIComponent(DS)}&rel=${encodeURIComponent(rel)}`;
+const dsFullUrl = (name, rel) => `/dsfull?name=${encodeURIComponent(name)}&rel=${encodeURIComponent(rel)}`;
+function lbAdd(url, label) { LBLIST.push({ url, label }); return LBLIST.length - 1; }
+function zoomAt(i) {
+  if (!LBLIST.length) return;
+  LBIDX = ((i % LBLIST.length) + LBLIST.length) % LBLIST.length;
+  const it = LBLIST[LBIDX];
+  document.getElementById('lightbox-img').src = it.url;
+  document.getElementById('lightbox-cap').textContent = `${LBIDX + 1} / ${LBLIST.length} · ${it.label}`;
+  const lb = document.getElementById('lightbox');
+  if (!lb.open) lb.showModal();
+}
+document.getElementById('lightbox').onclick = e => e.target.closest('img') || e.currentTarget.close();
+document.getElementById('lightbox-img').onclick = () => zoomAt(LBIDX + 1);
+document.addEventListener('keydown', e => {
+  if (!document.getElementById('lightbox').open) return;
+  if (e.key === 'ArrowLeft')       { e.preventDefault(); zoomAt(LBIDX - 1); }
+  else if (e.key === 'ArrowRight') { e.preventDefault(); zoomAt(LBIDX + 1); }
+});
+
+// -- 데이터셋 탭 (dataset/ 태깅 · 캡션 · toml) --------------------------------
+async function act2(path, payload) {
+  const res = await (await fetch(path, { method:'POST',
+    headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) })).json();
+  if (res.error) { toast(res.error); return null; }
+  return res;
+}
+
+async function loadProc() {
+  setMeta('불러오는 중…');
+  const d = await (await fetch('/api/processed')).json();
+  if (d.error) { setRoot(`<div class="msg err">${esc(d.error)}</div>`); return; }
+  PROC = d.datasets;
+  setMeta(`dataset/ ${PROC.length}개`);
+  renderProc();
+}
+
+function renderProc() {
+  const root = document.getElementById('root');
+  LBLIST = []; LBIDX = -1;  // 캡션 그리드(fillCaps)가 열리는 순서대로 다시 등록
+  if (!PROC || !PROC.length) {
+    root.innerHTML = `<p class="tiny">dataset/ 아래에 데이터셋이 없다 —
+      원시 dedup 탭에서 익스포트하거나 dataset/&lt;이름&gt;/ 에 이미지를 직접 넣는다.</p>`;
+    return;
+  }
+  let html = `<section><div class="sechead"><h2>데이터셋</h2>
+    <span class="tiny">태깅 → 캡션 검수 → toml 생성 → ./3_run_training.sh &lt;이름&gt;</span></div>`;
+  for (const d of PROC) {
+    const rep = d.repeats.length ? `repeat ${d.repeats.join('/')}` : '평면';
+    const capCls = d.images && d.captions >= d.images ? 'ok' : (d.captions ? 'warn' : '');
+    const open = OPENCAPS.has(d.name);
+    html += `<div class="group"><div class="ghead">
+      <b>${esc(d.name)}</b>
+      <span class="badge">${d.images}장</span>
+      <span class="badge ${capCls}">캡션 ${d.captions}/${d.images}</span>
+      <span class="badge">${rep}</span>
+      ${d.has_toml ? '<span class="badge ok">toml ✓</span>' : '<span class="badge warn">toml 없음</span>'}
+      ${d.last_tag ? `<span class="tiny">최근 태깅: ${esc(d.last_tag.trigger)}${d.last_tag.include_rating ? ' +rating' : ''}</span>` : ''}
+      <span class="spacer"></span>
+      <button onclick="toggleCaps('${esc(d.name)}')">${open ? '캡션 닫기' : '캡션 보기'}</button>
+      <button onclick="openTag('${esc(d.name)}')">태깅…</button>
+      <button onclick="openCfg('${esc(d.name)}')">toml 생성/편집…</button>
+    </div><div class="tiles" id="caps-${esc(d.name)}" style="display:none"></div></div>`;
+  }
+  html += `</section>`;
+  root.innerHTML = html;
+  for (const name of [...OPENCAPS]) {
+    if (PROC.some(d => d.name === name)) fillCaps(name); else OPENCAPS.delete(name);
+  }
+}
+
+function toggleCaps(name) {
+  if (OPENCAPS.has(name)) OPENCAPS.delete(name); else OPENCAPS.add(name);
+  renderProc();
+}
+
+async function fillCaps(name) {
+  const box = document.getElementById(`caps-${name}`);
+  if (!box) return;
+  box.style.display = '';
+  box.innerHTML = '<p class="tiny">캡션 불러오는 중…</p>';
+  const d = await (await fetch(`/api/captions?name=${encodeURIComponent(name)}`)).json();
+  if (d.error) { box.innerHTML = `<div class="msg err">${esc(d.error)}</div>`; return; }
+  let h = '';
+  for (const it of d.items) {
+    h += `<div class="tile">
+      <img class="thumb" loading="lazy"
+           src="/dsthumb?name=${encodeURIComponent(name)}&rel=${encodeURIComponent(it.rel)}"
+           onclick="zoomAt(${lbAdd(dsFullUrl(name, it.rel), it.rel)})" title="클릭=미리보기 (←/→ 탐색)">
+      <div class="tiny" title="${esc(it.rel)}">${esc(it.name)}</div>
+      <textarea class="cap" placeholder="(캡션 없음 — 저장하면 생성)"
+        onchange="saveCap('${esc(name)}','${esc(it.rel)}',this)">${it.caption ? esc(it.caption) : ''}</textarea>
+    </div>`;
+  }
+  box.innerHTML = h || '<p class="tiny">이미지가 없다.</p>';
+}
+
+async function saveCap(name, rel, ta) {
+  const res = await act2('/api/caption', { name, rel, text: ta.value });
+  if (res) toast(res.caption === null ? '캡션 삭제됨 (빈 내용)' : '캡션 저장됨');
+}
+
+// -- 태깅 다이얼로그 ----------------------------------------------------------
+function openTag(name) {
+  TAGDS = name;
+  const d = PROC.find(x => x.name === name);
+  const last = d && d.last_tag;
+  document.getElementById('tag-ds').textContent = name;
+  document.getElementById('tag-trigger').value = last ? last.trigger : `@${name}`;
+  document.getElementById('tag-gth').value = last ? last.general_threshold : 0.35;
+  document.getElementById('tag-cth').value = last ? last.character_threshold : 0.85;
+  document.getElementById('tag-rating').checked = !!(last && last.include_rating);
+  document.getElementById('tag-overwrite').checked = false;
+  document.getElementById('tag-dlg').showModal();
+}
+document.getElementById('tag-run').onclick = async () => {
+  const res = await act2('/api/tag', {
+    name: TAGDS,
+    trigger: document.getElementById('tag-trigger').value.trim(),
+    general_threshold: parseFloat(document.getElementById('tag-gth').value) || 0.35,
+    character_threshold: parseFloat(document.getElementById('tag-cth').value) || 0.85,
+    include_rating: document.getElementById('tag-rating').checked,
+    overwrite: document.getElementById('tag-overwrite').checked,
+  });
+  if (!res) return;
+  document.getElementById('tag-dlg').close();
+  poll();
+};
+
+// -- toml 생성 다이얼로그 ------------------------------------------------------
+async function openCfg(name) {
+  CFGDS = name;
+  const d = PROC.find(x => x.name === name);
+  document.getElementById('cfg-ds').textContent = name;
+  document.getElementById('cfg-keep').value = d && d.last_tag && d.last_tag.include_rating ? 2 : 1;
+  document.getElementById('cfg-repeats-row').style.display = d && d.repeats.length ? 'none' : 'flex';
+  document.getElementById('cfg-preview').innerHTML = '';
+  document.getElementById('cfg-editor').value = '';
+  document.getElementById('cfg-dlg').showModal();
+  if (d && d.has_toml) {  // 기존 toml(수동 커스텀 포함)을 편집기로 불러온다
+    const t = await (await fetch(`/api/toml?name=${encodeURIComponent(name)}`)).json();
+    if (t.exists) {
+      document.getElementById('cfg-editor').value = t.text;
+      document.getElementById('cfg-preview').innerHTML =
+        `<div class="msg ok">기존 dataset/${esc(name)}.toml 을 불러왔다 — 저장하면 덮어쓴다.</div>`;
+    }
+  }
+}
+function cfgPayload(extra) {
+  return {
+    name: CFGDS,
+    resolution: document.getElementById('cfg-res').value.trim() || '1024',
+    num_repeats: parseInt(document.getElementById('cfg-repeats').value) || 2,
+    keep_tokens: parseInt(document.getElementById('cfg-keep').value) || 0,
+    shuffle_caption: document.getElementById('cfg-shuffle').checked,
+    enable_bucket: document.getElementById('cfg-bucket').checked,
+    bucket_no_upscale: document.getElementById('cfg-noup').checked,
+    min_bucket_reso: parseInt(document.getElementById('cfg-minb').value) || 512,
+    max_bucket_reso: parseInt(document.getElementById('cfg-maxb').value) || 1536,
+    ...extra,
+  };
+}
+function cfgStats(info) {
+  const steps = Object.entries(info.steps).map(([b, s]) => `b${b}:${s}`).join('&nbsp;&nbsp;');
+  return `<div class="msg ok">이미지 ${info.images}장 · 캡션 ${info.captions} · 서브셋 ${info.subsets.length}개
+      · 에폭당 학습이미지(반복반영) ≈ ${info.total_reps}<br>스텝수(batch별, ceil): ${steps}</div>`
+    + (info.captions === 0 ? '<div class="msg err">캡션(.txt)이 없다 — 먼저 태깅할 것.</div>' : '');
+}
+document.getElementById('cfg-dry').onclick = async () => {
+  const res = await act2('/api/make-config', cfgPayload({ dry_run: true }));
+  if (!res) return;
+  document.getElementById('cfg-editor').value = res.info.toml;
+  document.getElementById('cfg-preview').innerHTML = cfgStats(res.info);
+};
+document.getElementById('cfg-save').onclick = async () => {
+  const res = await act2('/api/save-toml',
+    { name: CFGDS, text: document.getElementById('cfg-editor').value });
+  if (!res) return;
+  document.getElementById('cfg-preview').innerHTML =
+    `<div class="msg ok">저장 완료 — ${esc(res.path)}<br>
+     next: <kbd>./3_run_training.sh ${esc(CFGDS)}</kbd></div>`
+    + (res.warning ? `<div class="msg err">${esc(res.warning)}</div>` : '');
+  toast(`toml 저장: dataset/${CFGDS}.toml`);
+  loadProc();
+};
+
+// -- 익스포트 --------------------------------------------------------------
+const exDlg = document.getElementById('export-dlg');
+document.getElementById('export').onclick = () => {
+  if (!DATA || DATA.need_embed) return toast('먼저 임베딩이 필요하다.');
+  document.getElementById('ex-name').value = DS;
+  document.getElementById('ex-preview').innerHTML = '';
+  exDlg.showModal();
+};
+function exPayload(extra) {
+  return {
+    name: document.getElementById('ex-name').value.trim() || DS,
+    repeat: parseInt(document.getElementById('ex-repeat').value) || 10,
+    rounding: document.getElementById('ex-round').value,
+    force: document.getElementById('ex-force').checked,
+    ...extra,
+  };
+}
+function renderStats(s) {
+  const dist = Object.entries(s.dist || {}).map(([n,c]) => `repeat_${n}×${c}`).join(' · ');
+  let h = `<div class="msg ok">이미지 ${s.images}장 · 그룹 ${s.groups}
+    (싱글턴 ${s.singletons} · 묶임 ${s.multi} · 강조 ${s.special}) · 제외 ${s.excluded}<br>
+    반복수 분포: ${dist || '-'} · 총 링크 ${s.total_reps}개</div>`;
+  const col = s.collisions || {};
+  if (Object.keys(col).length)
+    h += `<div class="msg err">플래트닝 이름 충돌 ${Object.keys(col).length}건 —
+      원시 파일명을 정리해야 익스포트된다. 예: ${esc(Object.keys(col)[0])}</div>`;
+  return h;
+}
+document.getElementById('ex-dry').onclick = async () => {
+  const res = await act('/api/export', exPayload({ dry_run: true }));
+  if (res) document.getElementById('ex-preview').innerHTML = renderStats(res.stats);
+};
+document.getElementById('ex-run').onclick = async () => {
+  const res = await act('/api/export', exPayload({}));
+  if (!res) return;
+  document.getElementById('ex-preview').innerHTML = renderStats(res.stats)
+    + `<div class="msg ok">완료 — ${esc(res.stats.out_dir)} 에 링크 ${res.stats.created}개 생성.
+       <button style="margin-left:8px"
+         onclick="document.getElementById('export-dlg').close();setView('proc')">데이터셋 탭에서 태깅 →</button></div>`;
+  toast(`익스포트 완료: dataset/${res.stats.name}`);
+};
+
+// -- 컨트롤 ----------------------------------------------------------------
+document.getElementById('ds').onchange = e => { DS = e.target.value; load(); };
+document.getElementById('thr').onchange = e => {
+  const v = parseFloat(e.target.value);
+  if (!isNaN(v) && v > 0 && v < 1) { THR = v; load(); } else { e.target.value = THR.toFixed(2); }
+};
+document.getElementById('embed').onclick = () => {
+  if (confirm(`${DS} 의 임베딩을 다시 계산한다. 캐시를 버리고 전부 다시 돌린다.`)) startEmbed(true);
+};
+
+boot();
+</script>
+</body>
+</html>

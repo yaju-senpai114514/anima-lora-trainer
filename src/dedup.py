@@ -1,7 +1,6 @@
 """DINOv2 CLS 임베딩 + centroid 응집형(agglomerative) 그룹핑 상태 모델 (공용 로직).
 
-파이프라인 0단계인 `0_dedup_raw.py` 가 import 한다. `app.py` 가 WD14Tagger 를 담고
-`1_tag_dataset.py` 가 재사용하는 것과 같은 구조다.
+웹 서버(src/webui/server.py)의 원시 dedup 탭과 런치 스크립트 0_dataset_server.py 가 쓴다.
 
 설계 (2026-07 재설계):
   - dataset_raw/<원시> 의 원본 파일은 **완전 read-only**. 리네임/이동/삭제 안 한다.
@@ -33,12 +32,9 @@ from pathlib import Path, PurePosixPath
 import numpy as np
 from PIL import Image, ImageOps
 
-ROOT = Path(__file__).resolve().parent
-RAW_ROOT = ROOT / "dataset_raw"
-DATASET_ROOT = ROOT / "dataset"
-CACHE_ROOT = ROOT / ".dedup"
+from .paths import DATASET_ROOT, DEDUP_CACHE_ROOT, IMAGE_EXTENSIONS, RAW_ROOT
 
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"}
+CACHE_ROOT = DEDUP_CACHE_ROOT
 MODEL_REPO = os.environ.get("DINOV2_MODEL", "facebook/dinov2-base")
 
 # 임베딩 속도의 실제 병목은 GPU forward(수백 ms)가 아니라 PIL 디코드/리사이즈다. 그래서 이미지
@@ -125,7 +121,7 @@ def list_raw_datasets() -> list[str]:
 def load_square_rgb(path: Path, size: int) -> Image.Image:
     """알파를 흰 배경에 합성 → 정사각 패딩 → size x size.
 
-    app.py 의 _prepare_image 와 같은 규약(정사각 패딩). DINOv2 기본 전처리는 center-crop 이라
+    tagging.py 의 _prepare_image 와 같은 규약(정사각 패딩). DINOv2 기본 전처리는 center-crop 이라
     세로로 긴 일러스트가 잘려 구도 비교가 어긋난다. (224 = 16*14, DINOv2 patch=14)
     """
     image = Image.open(path)

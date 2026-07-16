@@ -10,7 +10,7 @@ Usage: ./3_run_training.sh <trigger>
 
   <trigger>  학습할 데이터셋/설정 이름. 다음 두 파일이 있어야 한다:
                - config.<trigger>.env    (LoRA/학습 하이퍼파라미터)
-               - dataset/<trigger>.toml  (dataset_config; 2_make_config.py 산출)
+               - dataset/<trigger>.toml  (dataset_config; 0_dataset_server.py 웹 UI 산출)
              모델 경로는 config_model.env 에서 공통으로 읽는다.
 
              config.<trigger>.env 의 선택 변수(설정 시 사용, 4gpu 스크립트와 공통 API):
@@ -20,7 +20,7 @@ Usage: ./3_run_training.sh <trigger>
 
   예:  ./3_run_training.sh mychar
 
-  파이프라인: 0_dedup_raw → 1_tag_dataset → 2_make_config → 3_run_training
+  파이프라인: 0_dataset_server(웹 UI: dedup → 태깅 → toml) → 3_run_training
 EOF
 }
 
@@ -66,7 +66,7 @@ fi
 if [ ! -f "$TOML" ]; then
   echo "[error] dataset_config 없음: $TOML" >&2
   echo "        (config 의 DATASET_TOML 로 커스텀 지정 가능; 미지정 시 dataset/${TRIGGER}.toml)" >&2
-  echo "        먼저: uv run python 2_make_config.py ${TRIGGER}" >&2
+  echo "        먼저 웹 UI 에서 toml 생성: uv run python 0_dataset_server.py" >&2
   exit 1
 fi
 
@@ -128,7 +128,7 @@ if [ "$LOCAL_BATCH" -ne "$BATCH_SIZE" ]; then
   echo "        이대로 두면 실제로는 배치 ${LOCAL_BATCH} 로 학습하면서 로그엔 ${BATCH_SIZE} 로 찍힙니다." >&2
   echo "" >&2
   echo "        → toml 에서 batch_size 를 빼면 GPU 수와 무관하게 맞습니다 (권장):" >&2
-  echo "          uv run python 2_make_config.py ${TRIGGER} --force" >&2
+  echo "          (0_dataset_server.py 웹 UI 의 toml 생성 — batch_size 를 적지 않는다)" >&2
   echo "        → toml 의 batch_size=${LOCAL_BATCH} 가 멀티GPU 용이면 그 스크립트를 쓰세요:" >&2
   echo "          ./3_run_training_2gpu.sh (GPU당 $(( BATCH_SIZE / 2 )))  /  ./3_run_training_4gpu.sh (GPU당 $(( BATCH_SIZE / 4 )))" >&2
   exit 1
