@@ -20,7 +20,7 @@ Usage: ./3_run_training.sh <trigger>
 
   예:  ./3_run_training.sh mychar
 
-  파이프라인: 0_process_raw → 1_tag_dataset → 2_make_config → 3_run_training
+  파이프라인: 0_dedup_raw → 1_tag_dataset → 2_make_config → 3_run_training
 EOF
 }
 
@@ -203,7 +203,7 @@ fi
   --network_train_unet_only \
   --network_dim="$NETWORK_DIM" \
   --network_alpha="$NETWORK_ALPHA" \
-  --train_batch_size="$BATCH_SIZE" \
+  --train_batch_size="$LOCAL_BATCH" \
   --gradient_accumulation_steps="$GRADIENT_ACC_STEPS" \
   --optimizer_type="AdamW8bit" \
   --learning_rate="$LR" \

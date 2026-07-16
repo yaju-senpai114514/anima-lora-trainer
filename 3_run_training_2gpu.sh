@@ -37,7 +37,7 @@ Usage: ./3_run_training_2gpu.sh <trigger>
 
   예:  ./3_run_training_2gpu.sh mychar
 
-  파이프라인: 0_process_raw → 1_tag_dataset → 2_make_config → 3_run_training
+  파이프라인: 0_dedup_raw → 1_tag_dataset → 2_make_config → 3_run_training
 EOF
 }
 
