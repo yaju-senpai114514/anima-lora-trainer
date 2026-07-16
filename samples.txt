@@ -1,0 +1,11 @@
+# 4_sweep_grid.py 의 --mode samples 가 읽는 프롬프트 목록.
+# 한 줄 = 한 프롬프트(= 그리드 한 컬럼). 빈 줄과 '#' 주석은 무시된다.
+#
+# trigger 자리에는 <trigger_placeholder> 를 적는다. 스윕 시 --trigger 값(기본 @<name>)으로 치환된다.
+# 시드/해상도/스텝 등을 줄 끝에 붙여 컬럼별로 덮어쓸 수 있고(미지정 항목은 기본값/자동 시드가 채워짐):
+#   <prompt> --d <seed> --s <steps> --g <cfg> --w <w> --h <h> --n <negative>
+
+<trigger_placeholder>, 1girl, solo, upper body, looking at viewer, smile, simple background, white background --w 1024 --h 1024
+<trigger_placeholder>, 1girl, solo, school uniform, outdoors, cherry blossoms, looking at viewer, day --w 1024 --h 1024
+<trigger_placeholder>, 1girl, solo, full body, standing, dress, indoors, looking at viewer --w 832 --h 1216
+<trigger_placeholder>, 1girl, solo, portrait, night, city lights, jacket, serious --w 1024 --h 1024

@@ -1,0 +1,16 @@
+[general]
+caption_extension = ".txt"
+shuffle_caption = true
+keep_tokens = 1
+
+[[datasets]]
+resolution = [1024, 1024]
+batch_size = 2
+enable_bucket = true
+bucket_no_upscale = false
+min_bucket_reso = 512
+max_bucket_reso = 1536
+
+  [[datasets.subsets]]
+  image_dir = "../dataset/trigger_tag"
+  num_repeats = 2

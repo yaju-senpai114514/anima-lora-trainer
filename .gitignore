@@ -1,0 +1,33 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Dataset except placeholder
+dataset/*
+!dataset/trigger_tag.toml
+!dataset/trigger_tag/
+!dataset/trigger_tag/**
+
+dataset_raw/*
+!dataset_raw/PROCESS_RAW.md
+
+# 0a_dedup_raw.py 캐시 (DINOv2 임베딩 / 썸네일 / undo 로그)
+.dedup/
+
+# 로컬 전용 설정 (모델 경로/하이퍼파라미터). 예시는 *.example 로 제공된다.
+config.env
+config_model.env
+config.*.env
+
+# Output directory
+output/*
+
+# Generated logs
+*.log

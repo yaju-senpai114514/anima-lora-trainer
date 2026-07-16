@@ -1,0 +1,223 @@
+# =============================================================================
+# blacklist.txt  —  Artist / Style LoRA 용 WD tagger 태그 제외 목록
+# =============================================================================
+# 사용법
+#   - 한 줄에 태그 하나. '#' 로 시작하는 줄은 주석(무시).
+#   - WD tagger(app.py)는 '_' 를 공백으로 바꿔 출력하므로 여기서도 공백 표기.
+#     (언더스코어 파이프라인이면 "artist name" -> "artist_name" 으로 치환해서 사용)
+#
+# 핵심 원칙 (Artist STYLE LoRA 기준)
+#   1) 내용(content) 태그는 남긴다 → 포즈/의상/배경/표정/구도는 프롬프트로 제어해야
+#      하므로 캡션에 있어야 한다. 지우면 그 요소가 트리거에 통째로 구워진다.
+#   2) 식별/메타/소스 노이즈는 항상 제거 → 화풍과 무관하고 학습을 오염시킨다.
+#   3) "화풍 그 자체" 태그(매체/셰이딩 등)는 데이터셋 전체에서 균일할 때만 제거 →
+#      그래야 그 특징이 트리거로 흡수된다. 섞여 있으면 남겨서 제어권을 유지한다.
+#      → 이런 항목은 아래에서 기본 주석 처리(#) 해뒀다. 균일하면 주석을 풀어라.
+#
+#   ※ Character(캐릭터) LoRA라면 반대로 hair color/eye color 같은 고유 외형도
+#     제거해 트리거에 묶는다. 이 파일은 STYLE 용이라 외형은 남겨둔다.
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# [1] 서명 / 작가 식별 — 제외(캡션에 남김). ※ 2026-07-06 정책 변경
+#   화면에 박힌 작가 흔적(서명/워터마크/로고)은 "시각적 마크"다.
+#   태그를 남겨야 모델이 그 픽셀을 이 토큰에 묶어 분리 학습한다
+#   → 추론 때 프롬프트에서 빼거나 네거티브에 넣으면 억제됨.
+#   태그를 지우면 라벨만 사라지고 서명 픽셀은 트리거에 통째로 구워진다(bake-in).
+# -----------------------------------------------------------------------------
+# artist name
+# signature
+# artist logo
+# logo
+# studio logo
+# watermark
+# sample watermark
+# stamp
+# artist signature
+# character signature
+# copyright name
+# company name
+# title
+
+# -----------------------------------------------------------------------------
+# [2] SNS / 플랫폼 핸들 / 링크
+#   화면에 박히는 핸들/URL/QR = 시각적 마크 → [1]과 동일 논리로 캡션에 남긴다.
+#   비시각 메타(요청/플랫폼 명칭/VTuber 등)는 손잡이가 될 픽셀이 없으므로 계속 제거.
+# -----------------------------------------------------------------------------
+# username
+# twitter username
+# twitter logo
+# patreon username
+# patreon logo
+patreon request
+# weibo username
+# weibo logo
+# pixiv username
+# fanbox username
+# instagram username
+# tumblr username
+# web address
+# url
+# qr code
+# bar code
+# barcode
+social media
+# VTuber/메타 프랜차이즈 태그 — 비시각 노이즈 (레시피에서도 제거 대상)
+virtual youtuber
+vtuber
+
+# -----------------------------------------------------------------------------
+# [3] 텍스트 / 오버레이 — 거의 항상 제거
+#   화면 위 글자/말풍선은 학습 노이즈. 만화체 자체를 학습할 의도가 아니면 제거.
+#   (말풍선이 화풍의 핵심인 만화 LoRA면 speech bubble 류는 남길 수도 있음)
+# -----------------------------------------------------------------------------
+text
+english text
+japanese text
+korean text
+chinese text
+engrish text
+text focus
+spoken language
+speech bubble
+empty speech bubble
+thought bubble
+borrowed character
+dialogue
+caption
+subtitled
+closed captions
+sound effects
+onomatopoeia
+ranguage
+
+# -----------------------------------------------------------------------------
+# [4] 부루/소스/파일 메타 — 항상 제거
+#   해상도/출처/중복 표식 등 그림 내용이 아닌 데이터베이스 메타.
+# -----------------------------------------------------------------------------
+highres
+absurdres
+incredibly absurdres
+lowres
+huge filesize
+scan
+artbook
+non-web source
+duplicate
+pixel-perfect duplicate
+bad id
+bad pixiv id
+bad twitter id
+bad link
+image sample
+md5 mismatch
+resolution mismatch
+source request
+third-party edit
+# third-party watermark  → 시각적 워터마크라 [1] 논리로 캡션에 남김
+cropped
+letterboxed
+pillarboxed
+cover
+cover page
+doujin cover
+back cover
+content rating
+
+# -----------------------------------------------------------------------------
+# [5] 날짜 / 커미션 / 요청 / 캡션성 메타 — 항상 제거
+#   특정 트윗·이벤트 맥락이라 화풍 학습엔 해롭다.
+# -----------------------------------------------------------------------------
+dated
+dated commentary
+commentary
+commentary request
+english commentary
+chinese commentary
+korean commentary
+japanese commentary
+partial commentary
+commission
+skeb commission
+paid reward available
+request
+artist request
+character request
+translation request
+translated
+check translation
+hashtag
+milestone celebration
+happy birthday
+anniversary
+thank you
+
+# -----------------------------------------------------------------------------
+# [6] 평점(rating) 태그 — 선택
+#   레시피는 'safe' 를 고정 토큰으로 넣어 제어에 활용했다.
+#   따라서 기본은 "남김"(주석 처리). NSFW/SFW 제어를 캡션에 안 맡길 거면 주석 해제.
+# -----------------------------------------------------------------------------
+# general
+# sensitive
+# questionable
+# explicit
+# safe
+# rating:safe
+# rating:sensitive
+# rating:questionable
+# rating:explicit
+
+# -----------------------------------------------------------------------------
+# [7] 매체 / 화풍 기술자 — 조건부 (기본 주석 = 남김)
+#   ⚠ 데이터셋 "전체"가 동일한 화풍일 때만 주석을 풀어 제거하라.
+#     그래야 그 특징이 트리거(@mychar 등)에 흡수된다.
+#   섞여 있으면(예: 일부만 흑백) 남겨서 prompt 로 켜고 끌 수 있게 둔다.
+#   과도하게 지우면 LoRA 유연성이 떨어지고 모든 출력이 똑같아진다.
+# -----------------------------------------------------------------------------
+# monochrome
+# greyscale
+# sepia
+# traditional media
+# watercolor (medium)
+# oil painting (medium)
+# acrylic paint (medium)
+# marker (medium)
+# colored pencil (medium)
+# graphite (medium)
+# millipen (medium)
+# ballpoint pen (medium)
+# sketch
+# lineart
+# outline
+# pixel art
+# cel shading
+# flat color
+# limited palette
+# gradient
+# screentone
+# halftone
+# film grain
+# chromatic aberration
+# 3d
+# realistic
+# photorealistic
+# retro artstyle
+# minimalism
+# official art
+# game cg
+# screencap
+
+# -----------------------------------------------------------------------------
+# [절대 제거 금지] — 참고용 (블랙리스트에 넣지 말 것)
+#   아래 "내용" 태그들은 LoRA를 프롬프트로 제어 가능하게 해주는 핵심이다.
+#   STYLE LoRA에서 이걸 지우면 해당 요소가 트리거에 구워져 다양성이 사라진다.
+#     · 인원수:     1girl, 2girls, solo, multiple girls ...
+#     · 포즈/시선:  standing, sitting, looking at viewer, arms up ...
+#     · 구도/프레임: full body, upper body, portrait, cowboy shot, from above ...
+#     · 의상/소품:  dress, hoodie, glasses, holding cup ...
+#     · 배경:       white background, simple background, outdoors, cafe ...
+#     · 표정:       smile, blush, open mouth ...
+#     · 외형(STYLE 한정 유지): long hair, blonde hair, blue eyes ...
+#       (Character LoRA라면 이건 제거 대상)
+# =============================================================================

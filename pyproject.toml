@@ -1,0 +1,52 @@
+[project]
+name = "anima-lora-trainer"
+version = "0.1.0"
+description = "Anima (Qwen-Image) LoRA training pipeline: WD14 tagging -> dataset config -> sd-scripts training."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    # ---- WD14 ONNX tagging (app.py / 1_tag_dataset.py) ----
+    # onnxruntime-gpu: CUDAExecutionProvider 로 GPU 태깅. torch(cu128)의 CUDA/cuDNN9 재사용.
+    # 1.22.0 은 CUDA 12 빌드(이후 버전은 CUDA 13 요구 -> libcudart.so.13 미스매치).
+    "onnxruntime-gpu==1.22.0",
+    "pandas",
+    "pillow",
+    # ---- sd-scripts (kohya) training stack — mirrors sd-scripts/requirements.txt ----
+    "torch==2.11.0",
+    "torchvision==0.26.0",
+    "accelerate==1.6.0",
+    "transformers==4.54.1",
+    "diffusers[torch]==0.32.1",
+    "ftfy==6.3.1",
+    "opencv-python==4.10.0.84",
+    "einops==0.7.0",
+    "bitsandbytes",
+    "lion-pytorch==0.2.3",
+    "schedulefree==1.4",
+    "pytorch-optimizer==3.10.0",
+    "prodigy-plus-schedule-free==1.9.2",
+    "prodigyopt==1.1.2",
+    "tensorboard",
+    "safetensors==0.4.5",
+    "toml==0.10.2",
+    "voluptuous==0.15.2",
+    "huggingface-hub==0.34.3",
+    "imagesize==1.4.1",
+    "numpy<2",
+    "rich==14.1.0",
+    "sentencepiece==0.2.1",
+    # sd-scripts itself (package name "library"), editable — see [tool.uv.sources]
+    "library",
+]
+
+# torch/torchvision come from the CUDA 12.8 wheel index (RTX 3090 = Ampere).
+# "library" is the local sd-scripts submodule installed editable.
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+library = { path = "sd-scripts", editable = true }
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
