@@ -18,7 +18,7 @@ dataset/*
 dataset_raw/*
 !dataset_raw/README.md
 
-# 0_dataset_server.py 캐시 (DINOv2 임베딩 / 썸네일 / WD 태그 캐시 / state.json)
+# 1_dataset_server.py 캐시 (DINOv2 임베딩 / 썸네일 / WD 태그 캐시 / state.json)
 .dedup/
 
 # 로컬 전용 설정 (모델 경로/하이퍼파라미터). 예시는 *.example 로 제공된다.

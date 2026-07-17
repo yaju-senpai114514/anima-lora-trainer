@@ -14,7 +14,7 @@ import math
 import re
 from pathlib import Path
 
-from .paths import DATASET_ROOT, IMAGE_EXTENSIONS
+from .paths import DATASET_ROOT, IMAGE_EXTENSIONS, ROOT
 
 
 def parse_resolution(value: str) -> list[int]:
@@ -101,6 +101,77 @@ def total_repeats(data_dir: Path, name: str, subsets: list[tuple[str, int]]) -> 
         tail = Path(image_dir).name
         return data_dir if tail == name else data_dir / tail
     return sum(count_images(_subset_dir(d)) * r for d, r in subsets)
+
+
+# LR 추천 앵커 — 리포 관례에서 가져온 값:
+#   · config.*.env 주석 "LR=4e-5 # 약 2천스텝 가정" (dim64·alpha=dim·cosine)
+#   · config.r6r6d0.env 의 ran96 참조표: 총 ~2560 스텝에 맞춰 EPOCHS 를 조정
+#   · run_rurudo.sh: multires 트리플 블록은 고해상 스텝의 온도가 낮아 5e-5 로 소폭 상향
+# 즉 관례는 "LR 을 앵커에 고정하고 EPOCHS 로 총 스텝을 버짓에 맞추는" 쪽이다.
+LR_TARGET_STEPS = (2000, 2600)
+LR_SINGLE = "4e-5"
+LR_MULTIRES = "5e-5"
+
+
+def analyze_toml(parsed: dict, batch: int = 4) -> dict:
+    """저장 직전 dataset_config 분석 — 블록별 에폭당 스텝(@batch) 어림 + LR 추천.
+
+    multires(= [[datasets]] 블록 여러 개, r6r6d0_multires.toml 참조)는 같은 이미지가
+    블록마다 1회씩 등장하므로 에폭당 스텝이 블록 합이 된다. bucket 반올림/드롭은 무시한
+    어림값. image_dir 는 학습이 sd-scripts/ 에서 돌므로 그 기준 상대경로로 해석한다.
+    """
+    sd_base = ROOT / "sd-scripts"
+    blocks: list[dict] = []
+    missing: list[str] = []
+    broken = 0  # 깨진 심링크 (raw 리네임 후 재익스포트 안 한 흔적 — 학습에서도 못 읽는다)
+    for d in parsed.get("datasets", []):
+        if not isinstance(d, dict):
+            continue
+        imgs = reps = 0
+        for s in d.get("subsets", []):
+            if not isinstance(s, dict):
+                continue
+            image_dir = str(s.get("image_dir", ""))
+            p = Path(image_dir)
+            p = (p if p.is_absolute() else sd_base / p).resolve()
+            if p.is_dir():
+                n = 0
+                for f in p.iterdir():
+                    if f.suffix.lower() not in IMAGE_EXTENSIONS:
+                        continue
+                    if f.is_file():
+                        n += 1
+                    elif f.is_symlink():
+                        broken += 1
+            else:
+                n = 0
+                missing.append(image_dir)
+            imgs += n
+            reps += n * int(s.get("num_repeats", 1))
+        res = d.get("resolution", "?")
+        if isinstance(res, list):
+            res = "×".join(str(x) for x in res)
+        blocks.append({"resolution": str(res), "images": imgs, "reps": reps,
+                       "steps": math.ceil(reps / batch) if reps else 0})
+
+    spe = sum(b["steps"] for b in blocks)  # 에폭당 스텝 (블록 합 = multires 반영)
+    multires = len(blocks) > 1
+    lo, hi = LR_TARGET_STEPS
+    return {
+        "batch": batch,
+        "blocks": blocks,
+        "steps_per_epoch": spe,
+        "multires": multires,
+        "missing_dirs": missing,
+        "broken_links": broken,
+        "lr": LR_MULTIRES if multires else LR_SINGLE,
+        "lr_note": (
+            f"multires {len(blocks)}블록 — 고해상 블록은 스텝 온도가 낮아 단일 기준({LR_SINGLE})에서 소폭 상향"
+            if multires else "dim64·alpha=dim·cosine 관례 (dim32 면 2e-5)"
+        ),
+        "target_steps": [lo, hi],
+        "rec_epochs": [math.ceil(lo / spe), math.ceil(hi / spe)] if spe else None,
+    }
 
 
 def make_config(

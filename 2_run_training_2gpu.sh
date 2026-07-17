@@ -4,26 +4,25 @@ set -euo pipefail
 REPO="$( cd "$( dirname "$0" )" && pwd -P )"
 cd "$REPO"
 
-# 4-GPU 버전: 4개 GPU 에 로컬 배치 1씩 분배해 1-GPU 실행과 동등한 학습(글로벌 배치 4)을 한다.
+# 2-GPU 버전: 2개 GPU 에 로컬 배치 2씩 분배해 글로벌 배치 4 를 만든다
+# (1-GPU train_batch_size=4 와 동등).
 #
 # ★ 로컬 배치를 정하는 것은 dataset toml 의 batch_size 다. --train_batch_size 가 아니다.
 #   sd-scripts 는 --dataset_config 가 있으면 toml 값을 우선한다
 #   (library/config_util.py search_value: [dataset, general, argparse] 순으로 첫 non-None).
 #   --train_batch_size 는 로그와 LoRA 메타데이터에만 쓰인다
 #   (train_network.py 의 ss_batch_size_per_device / total_batch_size).
-#   예전 이 스크립트는 LOCAL_BATCH=1 을 하드코딩해 --train_batch_size=1 로 넘겼지만,
-#   toml 이 batch_size=4 면 실제로는 GPU당 4 → 글로벌 16 으로 돌면서 로그만 4 로 찍혔다.
-#   그래서 지금은 toml 을 읽어 실제 글로벌 배치를 검증하고, 같은 값을 --train_batch_size
-#   로도 넘겨 로그/메타데이터가 실제와 일치하게 한다.
-NUM_GPUS=4
+#   그래서 여기서는 toml 을 읽어 실제 글로벌 배치를 검증하고, 같은 값을
+#   --train_batch_size 로도 넘겨 로그/메타데이터가 실제와 일치하게 한다.
+NUM_GPUS=2
 
 usage() {
   cat <<'EOF'
-Usage: ./3_run_training_4gpu.sh <trigger>
+Usage: ./2_run_training_2gpu.sh <trigger>
 
   <trigger>  학습할 데이터셋/설정 이름. 다음 두 파일이 있어야 한다:
                - config.<trigger>.env    (LoRA/학습 하이퍼파라미터)
-               - dataset/<trigger>.toml  (dataset_config; 0_dataset_server.py 웹 UI 산출)
+               - dataset/<trigger>.toml  (dataset_config; 1_dataset_server.py 웹 UI 산출)
              모델 경로는 config_model.env 에서 공통으로 읽는다.
 
              config.<trigger>.env 의 선택 변수(설정 시 사용, 1gpu 스크립트와 공통 API):
@@ -31,14 +30,14 @@ Usage: ./3_run_training_4gpu.sh <trigger>
                - SEED           난수 시드 고정(멀티GPU 캡션 셔플 일관성). 미설정 시 랜덤
                - OUT_DIR        출력 디렉토리 오버라이드(절대/REPO상대). 미설정 시 기본 규칙
 
-  이 스크립트는 4-GPU 전용이다:
-               - GPU당 배치 = BATCH_SIZE(글로벌)/4 을 --train_batch_size 로 넘긴다.
+  이 스크립트는 2-GPU 전용이다:
+               - GPU당 배치 = BATCH_SIZE(글로벌)/2 을 --train_batch_size 로 넘긴다.
                - toml 생성기(웹 UI)는 batch_size 를 적지 않는다. 구형/수동 toml 에
-                 있으면 sd-scripts 가 그걸 우선하므로 × 4 == BATCH_SIZE 를 검증한다.
+                 있으면 sd-scripts 가 그걸 우선하므로 × 2 == BATCH_SIZE 를 검증한다.
 
-  예:  ./3_run_training_4gpu.sh mychar
+  예:  ./2_run_training_2gpu.sh mychar
 
-  파이프라인: 0_dataset_server(웹 UI: dedup → 태깅 → toml) → 3_run_training
+  파이프라인: 1_dataset_server(웹 UI: dedup → 태깅 → toml) → 2_run_training
 EOF
 }
 
@@ -84,7 +83,7 @@ fi
 if [ ! -f "$TOML" ]; then
   echo "[error] dataset_config 없음: $TOML" >&2
   echo "        (config 의 DATASET_TOML 로 커스텀 지정 가능; 미지정 시 dataset/${TRIGGER}.toml)" >&2
-  echo "        먼저 웹 UI 에서 toml 생성: uv run python 0_dataset_server.py" >&2
+  echo "        먼저 웹 UI 에서 toml 생성: uv run python 1_dataset_server.py" >&2
   exit 1
 fi
 
@@ -147,7 +146,7 @@ if [ $(( LOCAL_BATCH * NUM_GPUS )) -ne "$BATCH_SIZE" ]; then
   echo "        --train_batch_size 는 무시됩니다 (로그/메타데이터에만 반영)." >&2
   echo "" >&2
   echo "        → toml 에서 batch_size 를 빼면 GPU 수와 무관하게 맞습니다 (권장):" >&2
-  echo "          (0_dataset_server.py 웹 UI 의 toml 생성 — batch_size 를 적지 않는다)" >&2
+  echo "          (1_dataset_server.py 웹 UI 의 toml 생성 — batch_size 를 적지 않는다)" >&2
   echo "        → toml 에 꼭 고정해야 한다면 batch_size = ${WANT} 로 직접 수정하세요" >&2
   echo "          (toml 생성기는 batch_size 를 아예 쓰지 않습니다)." >&2
   exit 1

@@ -1,6 +1,6 @@
 """DINOv2 CLS 임베딩 + centroid 응집형(agglomerative) 그룹핑 상태 모델 (공용 로직).
 
-웹 서버(src/webui/server.py)의 원시 dedup 탭과 런치 스크립트 0_dataset_server.py 가 쓴다.
+웹 서버(src/webui/server.py)의 원시 dedup 탭과 런치 스크립트 1_dataset_server.py 가 쓴다.
 
 설계 (2026-07 재설계):
   - dataset_raw/<원시> 의 원본 파일은 **완전 read-only**. 리네임/이동/삭제 안 한다.

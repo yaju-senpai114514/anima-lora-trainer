@@ -3,11 +3,11 @@
 **Anima (Qwen-Image) 캐릭터/스타일 LoRA 학습 파이프라인.**
 
 데이터셋 프로세싱(dedup 그룹핑/익스포트 → WD14 태깅 → dataset config 생성)은 **웹 서버 하나**
-(`0_dataset_server.py`)에서 끝나고, 학습은 [kohya-ss/sd-scripts] 의 `anima_train_network.py` 를
+(`1_dataset_server.py`)에서 끝나고, 학습은 [kohya-ss/sd-scripts] 의 `anima_train_network.py` 를
 감싼 셸 스크립트로 돌린다.
 
 ```
-dataset_raw/ ──▶  0_dataset_server.py 웹 UI  ──▶  3_run_training.sh  ──▶  4_sweep_grid.py
+dataset_raw/ ──▶  1_dataset_server.py 웹 UI  ──▶  2_run_training.sh  ──▶  3_sweep_grid.py
                  (dedup 익스포트 → WD14 태깅          학습                   에폭 그리드 스윕
                   → dataset/<name>.toml)
 ```
@@ -55,7 +55,7 @@ git submodule update --init --recursive
 uv sync
 ```
 
-`uv sync` 가 끝나면 프로젝트 루트에 `.venv/` 가 생기고, `3_run_training.sh` 는 이 `.venv` 를
+`uv sync` 가 끝나면 프로젝트 루트에 `.venv/` 가 생기고, `2_run_training.sh` 는 이 `.venv` 를
 그대로 사용한다. 설치 확인:
 
 ```bash
@@ -77,8 +77,8 @@ cp config_model.env.example   config_model.env    # 모델 경로 (모든 스크
 cp config.trigger.env.example config.mychar.env   # 트리거별 하이퍼파라미터 (config.<trigger>.env)
 ```
 
-- **학습**(`3_run_training*.sh <trigger>`)은 `config_model.env`(경로) + `config.<trigger>.env`(하이퍼파라미터)를 읽는다.
-- **스윕**(`4_sweep_grid.py`)은 `config_model.env`(경로)만 읽는다. rank·에폭 등은 출력 폴더에서 자동 추출한다.
+- **학습**(`2_run_training*.sh <trigger>`)은 `config_model.env`(경로) + `config.<trigger>.env`(하이퍼파라미터)를 읽는다.
+- **스윕**(`3_sweep_grid.py`)은 `config_model.env`(경로)만 읽는다. rank·에폭 등은 출력 폴더에서 자동 추출한다.
 
 `config_model.env` 예시 (모델 경로. 큰따옴표 안 `~` 는 확장 안 되므로 `$HOME` 사용):
 
@@ -111,15 +111,15 @@ GRADIENT_CHECKPOINTING=1
 아래는 데이터셋 이름이 `mychar` 인 예시다. `<name>` 은 `dataset/<name>/` 폴더명이자
 LoRA 출력 이름의 기준이 된다.
 
-### 0단계 — 데이터셋 프로세싱 웹 서버 (`0_dataset_server.py`)
+### 1단계 — 데이터셋 프로세싱 웹 서버 (`1_dataset_server.py`)
 
 dedup(그룹핑/익스포트) · WD14 태깅 · toml 생성이 **웹 UI 하나**에 있다. 탭 2개:
 **원시 dedup**(`dataset_raw/` → `dataset/` 익스포트)과 **데이터셋**(`dataset/` 태깅·캡션·toml).
 
 ```bash
-uv run python 0_dataset_server.py                # → http://127.0.0.1:8765
-uv run python 0_dataset_server.py mychar         # 미리 임베딩해서 요약을 찍고 그 데이터셋으로 시작
-uv run python 0_dataset_server.py mychar --print # 서버 없이 dedup 현황/후보만 출력
+uv run python 1_dataset_server.py                # → http://127.0.0.1:8765
+uv run python 1_dataset_server.py mychar         # 미리 임베딩해서 요약을 찍고 그 데이터셋으로 시작
+uv run python 1_dataset_server.py mychar --print # 서버 없이 dedup 현황/후보만 출력
 ```
 
 이미 정리된 평면 이미지라면 `dataset/<name>/` 에 그대로 넣으면 된다 — **데이터셋 탭**에 떠서
@@ -153,9 +153,9 @@ DINOv2-base 의 CLS 임베딩으로 그룹핑/제외/강조한 뒤 `dataset/<nam
 | **제외 / 복구** | 익스포트에서 빼거나 되돌린다(원본은 그대로, 메타데이터만) |
 
 화면은 **후보 쌍 → 묶인 그룹 → 개별 이미지 → 제외됨** 순. **썸네일 클릭 = 미리보기**
-(라이트박스에서 `←`/`→` 또는 이미지 클릭으로 현재 화면의 이미지들을 순서대로 탐색).
-수동 병합/구분은 타일·그룹 헤더의 **[선택]** 버튼 — 두 개를 선택하면 상단에 병합/다르다
-확인 바가 뜬다.
+(라이트박스에서 `←`/`→` 또는 이미지 클릭으로 현재 화면의 이미지들을 순서대로 탐색,
+`Space` 로 넘기면서 바로 강조(2R) 토글 — 그룹 멤버면 그룹 단위). 수동 병합/구분은
+타일·그룹 헤더의 **[선택]** 버튼 — 두 개를 선택하면 상단에 병합/다르다 확인 바가 뜬다.
 
 **익스포트**(상단 `익스포트…`): `--name`/`repeat`(R)/`rounding` 을 지정하면 미리보기(분포/충돌
 검사) 후 `dataset/<name>/repeat_<N>/` 에 **상대 심볼릭 링크**를 만든다. 반복수 규칙은
@@ -183,7 +183,7 @@ DINOv2-base 의 CLS 임베딩으로 그룹핑/제외/강조한 뒤 `dataset/<nam
 #### 데이터셋 탭 — WD14 태깅 · 캡션 검수 · toml 생성
 
 `dataset/` 아래 폴더별로 이미지/캡션/repeat 구조/toml 현황이 나온다. 흐름: **태깅… →
-캡션 보기(검수/수정) → toml 생성…** 그리고 터미널에서 `./3_run_training.sh <name>`.
+캡션 보기(검수/수정) → toml 생성…** 그리고 터미널에서 `./2_run_training.sh <name>`.
 
 **태깅…** — WD14 태거로 각 이미지를 태깅하고, `blacklist.txt` 의 태그를 제거한 뒤, 맨 앞에
 trigger 를 붙여 `<이미지>.txt` 를 생성한다. (첫 실행 시 WD 모델을 HuggingFace 에서 자동
@@ -222,15 +222,21 @@ trigger 를 붙여 `<이미지>.txt` 를 생성한다. (첫 실행 시 WD 모델
 저장 전에 toml 파싱을 검증하고, `batch_size` 가 들어 있으면 경고한다. 기존
 `dataset/<name>.toml` 이 있으면 다이얼로그를 열 때 자동으로 편집기에 불러온다.
 
+저장하면 즉시 **분석**이 뜬다: 블록별 **에폭당 스텝 어림(@글로벌 배치 4)** — multires
+블록([[datasets]] 여러 개)은 같은 이미지가 블록마다 1회씩 돌므로 합산 — 과 **LR 추천**
+(관례: 총 2000–2600 스텝 버짓에 단일 블록 4e-5 / multires 5e-5, dim64·alpha=dim 기준),
+그리고 버짓 기준 **권장 EPOCHS**. image_dir 누락과 **깨진 심링크**(raw 리네임 후
+재익스포트 안 한 경우 — 학습에서도 못 읽는다)도 여기서 걸린다.
+
 > `batch_size` 는 toml 에 **아예 적지 않는다**(옵션도 없다). 배치는 GPU 수에 딸린 실행 시점
 > 설정이라 학습 스크립트의 `--train_batch_size` 가 정한다 — 아래 멀티 GPU 절 참고.
 
-### 3단계 — 학습 (`3_run_training.sh`)
+### 2단계 — 학습 (`2_run_training.sh`)
 
 `config_model.env`(경로) + `config.<trigger>.env`(하이퍼파라미터) + `dataset/<name>.toml` 을 사용해 `accelerate launch` 로 LoRA 를 학습한다.
 
 ```bash
-./3_run_training.sh mychar
+./2_run_training.sh mychar
 ```
 
 - 결과: `output/mychar/anima_mychar_r32.safetensors` (`r32` 은 `NETWORK_DIM`)
@@ -241,15 +247,15 @@ trigger 를 붙여 `<이미지>.txt` 를 생성한다. (첫 실행 시 WD 모델
 참고 — `mychar`(227장, repeats 2 → 454, batch 2)의 경우 총 24 에폭 = 5448 스텝,
 RTX 3090 기준 약 3.3s/it (전체 ~5시간).
 
-#### 멀티 GPU (`3_run_training_2gpu.sh` / `3_run_training_4gpu.sh`)
+#### 멀티 GPU (`2_run_training_2gpu.sh` / `2_run_training_4gpu.sh`)
 
 `config.<trigger>.env` 의 `BATCH_SIZE` 는 **글로벌 배치**다. 스크립트가 이걸 GPU 수로 나눠
 `--train_batch_size`(= GPU당 배치)로 넘긴다. **toml 은 손댈 필요 없다** — 같은 toml 로 셋 다 돈다.
 
 ```bash
-./3_run_training.sh      mychar   # 1 GPU × 4 = 글로벌 4
-./3_run_training_2gpu.sh mychar   # 2 GPU × 2 = 글로벌 4
-./3_run_training_4gpu.sh mychar   # 4 GPU × 1 = 글로벌 4
+./2_run_training.sh      mychar   # 1 GPU × 4 = 글로벌 4
+./2_run_training_2gpu.sh mychar   # 2 GPU × 2 = 글로벌 4
+./2_run_training_4gpu.sh mychar   # 4 GPU × 1 = 글로벌 4
 ```
 
 그래서 toml 생성기(웹 UI)는 **`batch_size` 를 toml 에 아예 적지 않는다**(옵션도 없다).
@@ -267,36 +273,38 @@ RTX 3090 기준 약 3.3s/it (전체 ~5시간).
 
 출력 디렉토리는 `gb<글로벌배치>` 규칙이라 GPU 수가 달라도 같은 곳을 쓴다 → resume 호환.
 
-### 4단계 — 에폭 그리드 스윕 (`4_sweep_grid.py`)
+### 3단계 — 에폭 그리드 스윕 (`3_sweep_grid.py`)
 
 학습이 끝나면 `output/<run>/`(예: `output/mychar_gb4_lr4e-5_ep18`)에 에폭별 체크포인트가
 쌓인다. 이 스크립트는 **출력 폴더 자체에서 trigger·rank·에폭을 자동 추출**해(심링크·별도
-config 불필요), 최종 포함 N개 에폭을 골라 같은 프롬프트로 생성하고 "행=에폭 × 열=프롬프트"
-그리드 PNG 로 묶는다. 에폭들은 **시스템의 모든 GPU 에 분산돼 병렬로** 돈다.
+config 불필요), 학습 **전 구간에서 균등하게** 에폭을 골라 같은 프롬프트로 생성하고
+"행=에폭 × 열=프롬프트" 그리드 PNG 로 묶는다. 에폭들은 **시스템의 모든 GPU 에 분산돼 병렬로** 돈다.
 
 ```bash
-# 출력 폴더 직접 지정 (또는 트리거만 줘도 output/ 에서 유일하면 자동으로 찾는다)
-uv run python 4_sweep_grid.py mychar_gb4_lr4e-5_ep18
+# 트리거만 주면 output/ 에서 유일 매칭 폴더를 찾고, 데이터셋 캡션에서 in-distribution
+# 프롬프트를 뽑아 전 구간 균등 6개 에폭(최종 포함)을 50스텝·CFG 4.5 로 생성한다.
+uv run python 3_sweep_grid.py mychar
 
-# in-distribution: 데이터셋 캡션에서 6개 프롬프트 샘플링, 후반 5개 에폭
-uv run python 4_sweep_grid.py mychar --mode tags --num-prompts 6 --num-epochs 5
-
-# 특정 GPU 만 / 에폭 직접 지정 / 생성 건너뛰고 그리드만 재합성
-uv run python 4_sweep_grid.py mychar --gpus 0,1 --epochs 14,16,18 --grid-only
+# samples.txt 프롬프트로 / 특정 GPU 만 / 에폭 직접 지정 / 그리드만 재합성
+uv run python 3_sweep_grid.py mychar --mode samples
+uv run python 3_sweep_grid.py mychar --gpus 0,1 --epochs 14,16,18 --grid-only
 ```
 
 - 결과: `output/<run>/sweep_<mode>/grid_<trigger>.png` (+ 에폭별 이미지 `ep<NN>/`, 에폭별 로그 `ep<NN>.log`)
 - **인자**: 출력 폴더 이름/경로, 또는 트리거(= `output/<트리거>*` 유일 매칭이면 자동 해석).
 - **프롬프트 소스 2종**:
-  - `--mode samples`(기본): `samples.txt` 의 줄을 컬럼으로. `<trigger_placeholder>` 는
+  - `--mode tags`(기본): `dataset/<trigger>/` 캡션에서 샘플링(= **in-distribution** 프롬프트 —
+    학습 분포 안에서 봐야 에폭 간 차이가 재현/과적합 신호로 읽힌다). `--num-prompts`(기본 4)개
+    캡션 × `--num-tags`(기본 10)개 태그, `--rng-seed` 로 재현 가능. 캡션이 없으면 samples 폴백.
+  - `--mode samples`: `samples.txt` 의 줄을 컬럼으로. `<trigger_placeholder>` 는
     `--trigger`(기본 `@<자동추출>`)로 치환. 줄 끝 `--d/--s/--g/--w/--h/--n` 으로 컬럼별 오버라이드.
-  - `--mode tags`: `dataset/<trigger>/` 캡션에서 샘플링(= **in-distribution** 프롬프트).
-    `--num-tags`(기본 10)개 태그, `--rng-seed` 로 재현 가능.
-- **에폭 선택**: 기본은 **최종 포함 뒤에서 `--num-epochs`(기본 4)개**. `--epochs 12,16,20,24` 로 직접 지정.
+- **에폭 선택**: 기본은 **첫 저장분부터 최종까지 균등 분포로 `--num-epochs`(기본 6)개**.
+  마지막 N개만 보면 저학습 구간이 안 보여 "언제부터 과적합인가"를 판정할 수 없기 때문이다
+  (예: 40에폭 → 1, 9, 17, 24, 32, 40). `--epochs 12,16,20,24` 로 직접 지정 가능.
 - **병렬**: `--gpus`(기본 시스템 전체, 예 `0,1,2`, CPU 는 `cpu`). 한 에폭 = 한 서브프로세스가
   한 GPU 를 점유하고, 끝나면 대기 중인 다음 에폭이 그 GPU 를 이어받는다. 한 에폭이 실패해도
   나머지는 계속 돌고 그리드의 해당 행만 `missing` 으로 표시된다.
-- 기타: `--steps 24 --guidance 3.5 --width/--height --multiplier 1.0`,
+- 기타: `--steps 50 --guidance 4.5 --width/--height --multiplier 1.0`,
   `--dry-run`(계획만), `--grid-only`(그리드만 재합성), `--out`(출력 폴더).
 
 ---
@@ -310,14 +318,14 @@ src/                  공유 로직 패키지 — 루트 스크립트는 전부 
   tagging.py            WD14Tagger (ONNX) + 캡션 조립 + 폴더 태깅 엔진(WD 추론 캐시)
   configgen.py          dataset_config(toml) 생성 (ML 의존성 없음, batch_size 미기재)
   webui/                데이터셋 프로세싱 웹 서버 — server.py (HTTP) + static/index.html
-0_dataset_server.py   [0] 웹 서버 런처: dedup 그룹핑/익스포트 · WD14 태깅 · toml 생성
+1_dataset_server.py   [1] 웹 서버 런처: dedup 그룹핑/익스포트 · WD14 태깅 · toml 생성
 dataset_raw/          원시(중첩) 데이터셋 (read-only) + README.md
 .dedup/               캐시 (gitignore): <name>/ 임베딩·썸네일·state.json / wd14_cache.json 등
-3_run_training.sh     [3] accelerate 로 sd-scripts 학습 실행 (1 GPU)
-3_run_training_2gpu.sh  [3] 같은 글로벌 배치를 2 GPU 로 분할 (BATCH_SIZE/2 씩)
-3_run_training_4gpu.sh  [3] 같은 글로벌 배치를 4 GPU 로 분할 (BATCH_SIZE/4 씩)
-4_sweep_grid.py       [4] 에폭별 LoRA 적용 → 그리드 스윕 PNG (다중 GPU 병렬)
-samples.txt           [4] samples 모드 프롬프트 목록 (열 = 한 줄)
+2_run_training.sh     [2] accelerate 로 sd-scripts 학습 실행 (1 GPU)
+2_run_training_2gpu.sh  [2] 같은 글로벌 배치를 2 GPU 로 분할 (BATCH_SIZE/2 씩)
+2_run_training_4gpu.sh  [2] 같은 글로벌 배치를 4 GPU 로 분할 (BATCH_SIZE/4 씩)
+3_sweep_grid.py       [3] 에폭별 LoRA 적용 → 그리드 스윕 PNG (다중 GPU 병렬)
+samples.txt           [3] samples 모드 프롬프트 목록 (열 = 한 줄)
 config_model.env      모델 경로 (모든 스크립트 공통; *.example 템플릿 제공, 실제는 gitignore)
 config.<trigger>.env  트리거별 LoRA 하이퍼파라미터 (gitignore)
 blacklist.txt         제외할 WD 태그 목록 (스타일/캐릭터 LoRA 용)

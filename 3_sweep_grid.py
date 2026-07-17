@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""[4] 학습 완료된 LoRA 들을 에폭별로 적용해 그리드 스윕을 돌리는 파이프라인 스크립트.
+"""[3] 학습 완료된 LoRA 들을 에폭별로 적용해 그리드 스윕을 돌리는 파이프라인 스크립트.
 
-3_run_training*.sh 가 output/<run>/ 에 찍어둔 에폭 체크포인트들
+2_run_training*.sh 가 output/<run>/ 에 찍어둔 에폭 체크포인트들
 (anima_<trigger>_r<dim>-NNNNNN.safetensors + 최종 anima_<trigger>_r<dim>.safetensors)을
 모아, 같은 프롬프트 묶음을 여러 에폭에 적용해 생성한 뒤 "행=에폭 × 열=프롬프트" 그리드로 묶는다.
 
@@ -9,22 +9,23 @@
     1) config_model.env 에서 모델 경로(PATH_MODEL/PATH_QWEN/PATH_VAE)만 읽는다.
     2) 출력 폴더 자체에서 trigger / dim / 에폭을 **자동 추출**한다(심링크·config.env shim 불필요).
        최종 에폭은 폴더명의 `_ep<N>` 에서, 없으면 최대 numbered+1 로 추정.
-    3) 프롬프트 묶음을 만든다:
-         --mode samples : samples.txt(또는 --samples-file)의 프롬프트.
+    3) 스윕할 에폭을 학습 **전 구간에서 균등하게** 고른다(최종 포함, 기본 6개).
+       마지막 N 개만 보면 저학습 구간이 안 보여 과적합 판정이 안 되기 때문.
+    4) 프롬프트 묶음을 만든다 (기본 tags — 캡션이 없으면 samples 로 폴백):
          --mode tags    : dataset/<trigger>/ 캡션에서 샘플링 (= in-distribution 프롬프트).
-    4) 에폭마다 sd-scripts/anima_minimal_inference.py 를 배치 모드로 돌린다.
+         --mode samples : samples.txt(또는 --samples-file)의 프롬프트.
+    5) 에폭마다 sd-scripts/anima_minimal_inference.py 를 배치 모드로 돌린다(50스텝·CFG 4.5).
        **여러 GPU 에 에폭을 분산**해 병렬로 생성한다(--gpus, 기본: 시스템의 모든 GPU).
-    5) 시드로 이미지를 매칭해 그리드 PNG(grid_<trigger>.png)를 합성한다.
+    6) 시드로 이미지를 매칭해 그리드 PNG(grid_<trigger>.png)를 합성한다.
 
 사용 예:
-    # 출력 폴더를 직접 지정. samples.txt 로 최종 포함 4개 에폭, 모든 GPU 병렬.
-    uv run python 4_sweep_grid.py mychar_gb4_lr4e-5_ep18
+    # 트리거(또는 출력 폴더)만 주면: 데이터셋 캡션에서 in-distribution 프롬프트를 뽑고,
+    # 학습 전 구간에서 균등하게 6개 에폭(최종 포함)을 골라 모든 GPU 에 분산 생성한다.
+    uv run python 3_sweep_grid.py mychar
 
-    # 트리거만 줘도 output/ 에서 유일한 폴더면 자동으로 찾는다.
-    uv run python 4_sweep_grid.py mychar --mode tags --num-prompts 6 --num-epochs 6
-
-    # 특정 GPU 만 / 에폭 직접 지정 / 생성 건너뛰고 그리드만 재합성
-    uv run python 4_sweep_grid.py mychar --gpus 0,1 --epochs 12,16,20,24 --grid-only
+    # samples.txt 프롬프트로 / 특정 GPU 만 / 에폭 직접 지정 / 그리드만 재합성
+    uv run python 3_sweep_grid.py mychar --mode samples
+    uv run python 3_sweep_grid.py mychar --gpus 0,1 --epochs 12,16,20,24 --grid-only
 """
 from __future__ import annotations
 
@@ -148,7 +149,11 @@ def discover(run_dir: Path) -> tuple[str, str, dict[int, Path]]:
 
 
 def select_epochs(available: list[int], num: int, explicit: list[int] | None) -> list[int]:
-    """최종 에폭을 포함해 num 개의 후반 에폭을 고른다."""
+    """스윕할 에폭 num 개를 학습 전 구간에서 균등하게 고른다 (첫 저장분·최종 포함).
+
+    후반 에폭만 보면 "언제부터 과적합인가"를 판정할 수 없다 — 진단은 저학습(초반)과
+    번(luminance↑/contrast↓, 후반)을 한 그리드에서 비교해야 한다. --epochs 로 명시하면 그대로.
+    """
     available = sorted(available)
     if explicit:
         chosen = [e for e in explicit if e in available]
@@ -159,7 +164,12 @@ def select_epochs(available: list[int], num: int, explicit: list[int] | None) ->
             raise SystemExit(f"[error] 지정한 에폭 중 가용한 것이 없다. 가용: {available}")
         return sorted(chosen)
     num = max(1, min(num, len(available)))
-    return available[-num:]
+    if num == len(available):
+        return available
+    if num == 1:
+        return [available[-1]]
+    step = (len(available) - 1) / (num - 1)
+    return [available[int(i * step + 0.5)] for i in range(num)]
 
 
 # ------------------------------------------------------------------------ 프롬프트 빌드
@@ -248,7 +258,7 @@ def build_from_tags(trigger_name: str, num_prompts: int, num_tags: int,
 
 
 def write_prompts_file(path: Path, columns) -> None:
-    header = "# 4_sweep_grid.py 가 생성한 prompts.txt (--from_file 배치 입력)\n"
+    header = "# 3_sweep_grid.py 가 생성한 prompts.txt (--from_file 배치 입력)\n"
     body = "\n".join(line for line, _seed, _label in columns)
     path.write_text(header + body + "\n", encoding="utf-8")
 
@@ -407,10 +417,11 @@ def build_grid(sweep_dir: Path, trigger: str, epochs: list[int], columns,
 
 # -------------------------------------------------------------------------------- main
 def main() -> int:
-    ap = argparse.ArgumentParser(description="[4] LoRA 에폭 그리드 스윕 (다중 GPU 병렬)")
+    ap = argparse.ArgumentParser(description="[3] LoRA 에폭 그리드 스윕 (다중 GPU 병렬)")
     ap.add_argument("run", help="출력 폴더 이름/경로 또는 트리거 (예: mychar_gb4_lr4e-5_ep18, mychar)")
-    ap.add_argument("--mode", choices=["samples", "tags"], default="samples",
-                    help="프롬프트 소스: samples=samples.txt, tags=데이터셋 태그(in-distribution) (기본 samples)")
+    ap.add_argument("--mode", choices=["samples", "tags"], default=None,
+                    help="프롬프트 소스: tags=데이터셋 캡션(in-distribution), samples=samples.txt "
+                         "(기본: tags, 단 dataset/<trigger>/ 에 캡션이 없으면 samples 폴백)")
     # 프롬프트 소스 옵션
     ap.add_argument("--samples-file", default=str(ROOT / "samples.txt"),
                     help="samples 모드에서 읽을 프롬프트 파일 (기본 ./samples.txt)")
@@ -422,12 +433,13 @@ def main() -> int:
                     help="tags 모드에서 캡션당 뽑을 태그 수 (trigger 제외, 기본 10)")
     ap.add_argument("--rng-seed", type=int, default=0, help="태그 샘플링 재현용 RNG 시드")
     # 에폭 선택
-    ap.add_argument("--num-epochs", type=int, default=4, help="고를 에폭 수, 최종 포함 (기본 4)")
+    ap.add_argument("--num-epochs", type=int, default=6,
+                    help="학습 전 구간에서 균등하게 고를 에폭 수, 첫 저장분·최종 포함 (기본 6)")
     ap.add_argument("--epochs", default=None,
                     help="에폭 직접 지정 (쉼표구분, 예: 12,16,20,24). 지정 시 --num-epochs 무시")
     # 생성 기본값
-    ap.add_argument("--steps", type=int, default=24)
-    ap.add_argument("--guidance", type=float, default=3.5)
+    ap.add_argument("--steps", type=int, default=50, help="샘플링 스텝 수 (기본 50)")
+    ap.add_argument("--guidance", type=float, default=4.5, help="CFG guidance scale (기본 4.5)")
     ap.add_argument("--width", type=int, default=1024)
     ap.add_argument("--height", type=int, default=1024)
     ap.add_argument("--negative", default=DEFAULT_NEGATIVE)
@@ -455,8 +467,17 @@ def main() -> int:
         "steps": args.steps, "guidance": args.guidance,
         "width": args.width, "height": args.height, "negative": args.negative,
     }
+    # 프롬프트 모드 자동 결정: 기본은 in-distribution 태그. 캡션이 없으면 samples 폴백.
+    mode = args.mode
+    if mode is None:
+        data_dir = IMAGE_ROOT / trigger
+        has_captions = data_dir.is_dir() and any(data_dir.rglob("*.txt"))
+        mode = "tags" if has_captions else "samples"
+        if mode == "samples":
+            print(f"[warn] dataset/{trigger}/ 에 캡션(.txt)이 없어 samples.txt 로 폴백한다.")
+
     trig_token = args.trigger if args.trigger else f"@{trigger}"
-    if args.mode == "samples":
+    if mode == "samples":
         columns = build_from_samples(Path(args.samples_file).resolve(), defaults, args.seed_base, trig_token)
     else:
         columns = build_from_tags(trigger, args.num_prompts, args.num_tags,
@@ -466,7 +487,7 @@ def main() -> int:
     if len(set(seeds)) != len(seeds):
         print(f"[warn] 컬럼 시드 중복 발견 {seeds} → 그리드 매칭이 어긋날 수 있다.")
 
-    sweep_dir = Path(args.out).resolve() if args.out else (run_dir / f"sweep_{args.mode}")
+    sweep_dir = Path(args.out).resolve() if args.out else (run_dir / f"sweep_{mode}")
     sweep_dir.mkdir(parents=True, exist_ok=True)
     write_prompts_file(sweep_dir / "prompts.txt", columns)
 
@@ -479,7 +500,8 @@ def main() -> int:
     if not gpus:
         raise SystemExit("[error] 사용할 GPU 를 찾지 못했다. --gpus 로 지정하거나 --gpus cpu 를 쓸 것.")
 
-    print(f"[plan] run={run_dir.name}  trigger={trigger}  dim=r{dim}  mode={args.mode}")
+    print(f"[plan] run={run_dir.name}  trigger={trigger}  dim=r{dim}  mode={mode}  "
+          f"steps={args.steps}  cfg={args.guidance}")
     print(f"[plan] epochs({len(epochs)}/{len(ckpts)}): {epochs}  (가용 {sorted(ckpts)})")
     print(f"[plan] prompts({len(columns)}) → {sweep_dir / 'prompts.txt'}")
     for line, seed, _ in columns:

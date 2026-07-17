@@ -1,4 +1,4 @@
-# 4_sweep_grid.py 의 --mode samples 가 읽는 프롬프트 목록.
+# 3_sweep_grid.py 의 --mode samples 가 읽는 프롬프트 목록.
 # 한 줄 = 한 프롬프트(= 그리드 한 컬럼). 빈 줄과 '#' 주석은 무시된다.
 #
 # trigger 자리에는 <trigger_placeholder> 를 적는다. 스윕 시 --trigger 값(기본 @<name>)으로 치환된다.

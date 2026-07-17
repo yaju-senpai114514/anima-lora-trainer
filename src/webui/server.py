@@ -1,7 +1,7 @@
 """데이터셋 프로세싱 웹 서버 (공용 로직). 프론트엔드는 static/index.html.
 
 구 0/1/2 단계(dedup 그룹핑/익스포트 · WD14 태깅 · toml 생성)를 하나의 서버로 병합했다.
-루트 스크립트 0_dataset_server.py 가 얇은 CLI 로 감싼다.
+루트 스크립트 1_dataset_server.py 가 얇은 CLI 로 감싼다.
 원본(dataset_raw/)은 완전 read-only, dedup 현황은 .dedup/<name>/state.json 으로만 관리.
 """
 from __future__ import annotations
@@ -501,7 +501,10 @@ def make_handler(default_ds: str | None, threshold: float, batch_size: int):
                     out = DATASET_ROOT / f"{ds_dir.name}.toml"
                     out.write_text(text, encoding="utf-8")
                     print(f"[config] wrote {out} (편집기 저장)")
-                    return self._json({"ok": True, "path": str(out), "warning": warning})
+                    # 저장 직후 분석: 에폭당 스텝(@글로벌 배치 4, multires 블록 합) + LR 추천
+                    analysis = configgen.analyze_toml(parsed)
+                    return self._json({"ok": True, "path": str(out),
+                                       "warning": warning, "analysis": analysis})
 
                 if url.path == "/api/make-config":
                     ds_dir = self._proc(body.get("name"))

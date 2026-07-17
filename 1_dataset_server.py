@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""[0] 데이터셋 프로세싱 웹 서버 — dedup 그룹핑/익스포트 + WD14 태깅 + toml 생성 통합.
+"""[1] 데이터셋 프로세싱 웹 서버 — dedup 그룹핑/익스포트 + WD14 태깅 + toml 생성 통합.
 
 구 0_dedup_raw.py / 1_tag_dataset.py / 2_make_config.py 를 하나의 서버로 병합했다.
 얇은 CLI 래퍼다 — 로직은 src/dedup.py · src/tagging.py · src/configgen.py, 서버/프론트엔드는
 src/webui/. 원본(dataset_raw/)은 완전 read-only, dedup 현황은 .dedup/<name>/state.json 으로만
-관리한다. 웹 UI 에서 toml 까지 만들면 다음은 ./3_run_training.sh <name>.
+관리한다. 웹 UI 에서 toml 까지 만들면 다음은 ./2_run_training.sh <name>.
 
 워크플로우 (웹 UI 탭 2개):
   원시 dedup 탭 : dataset_raw/<원시> → DINOv2 임베딩 → 그룹핑/제외/강조 →
@@ -13,9 +13,9 @@ src/webui/. 원본(dataset_raw/)은 완전 read-only, dedup 현황은 .dedup/<na
                   캡션 검수/수정 → dataset/<name>.toml 생성 (batch_size 미기재)
 
 사용 예:
-    uv run python 0_dataset_server.py                 # → http://127.0.0.1:8765
-    uv run python 0_dataset_server.py mychar          # 미리 임베딩 + 요약 출력 후 UI
-    uv run python 0_dataset_server.py mychar --print  # 서버 없이 dedup 현황만 출력
+    uv run python 1_dataset_server.py                 # → http://127.0.0.1:8765
+    uv run python 1_dataset_server.py mychar          # 미리 임베딩 + 요약 출력 후 UI
+    uv run python 1_dataset_server.py mychar --print  # 서버 없이 dedup 현황만 출력
 """
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ from src.webui.server import print_report, serve, state_payload
 
 def main() -> int:
     ap = argparse.ArgumentParser(
-        description="[0] 데이터셋 프로세싱 웹 서버 (dedup 그룹핑/익스포트 · WD14 태깅 · toml 생성)",
+        description="[1] 데이터셋 프로세싱 웹 서버 (dedup 그룹핑/익스포트 · WD14 태깅 · toml 생성)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     ap.add_argument("raw", nargs="?", default=None,
@@ -52,7 +52,7 @@ def main() -> int:
     args = ap.parse_args()
 
     if args.print_only and not args.raw:
-        raise SystemExit("[error] --print 는 데이터셋 이름이 필요하다 (예: 0_dataset_server.py mychar --print)")
+        raise SystemExit("[error] --print 는 데이터셋 이름이 필요하다 (예: 1_dataset_server.py mychar --print)")
 
     # fast/workers 는 프로세스 전역 스위치다. --fast/--workers 또는 DINOV2_FAST/DINOV2_WORKERS.
     if args.fast:

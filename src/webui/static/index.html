@@ -199,7 +199,10 @@
 </dialog>
 
 <dialog id="lightbox"><div class="dlg-body"><img id="lightbox-img" title="클릭=다음 (←/→ 탐색)">
-  <div id="lightbox-cap" class="tiny" style="text-align:center;padding:6px 4px 2px"></div></div></dialog>
+  <div style="display:flex;gap:10px;align-items:center;justify-content:center;padding:6px 4px 2px">
+    <span id="lightbox-cap" class="tiny"></span>
+    <button id="lightbox-sp" style="display:none" onclick="lbSpecial()"></button>
+  </div></div></dialog>
 <div id="toast"></div>
 
 <script>
@@ -343,7 +346,7 @@ function candSide(rel, gsize, special, info, other) {
   const resCls = area && otherArea && area > otherArea ? 'hi' : '';
   const byteCls = info.bytes && other.bytes && info.bytes > other.bytes ? 'hi' : '';
   return `<div class="side">
-    <img class="mini" src="${thumb(rel,120)}" onclick="zoomAt(${lbAdd(fullUrl(rel), rel)})">
+    <img class="mini" src="${thumb(rel,120)}" onclick="zoomAt(${lbAdd(fullUrl(rel), rel, rel, special)})">
     <div class="sideinfo">
       <span>${gsize>1?`<span class="badge">그룹 ${gsize}</span>`:''}${special?'<span class="badge warn">강조</span>':''}</span>
       <span class="tiny ${resCls}" title="픽셀 해상도">${info.w ? `${info.w}×${info.h}` : '–'}</span>
@@ -415,8 +418,8 @@ function render() {
     const m = g.members[0];
     const picked = PICK && (PICK.rel === g.rep || PICK.other === g.rep);
     html += `<div class="tile selectable ${picked?'sel':''}">
-      <img class="thumb" loading="lazy" src="${thumb(m.rel)}" onclick="zoomAt(${lbAdd(fullUrl(m.rel), m.rel)})"
-           title="${esc(m.rel)}&#10;클릭=미리보기 (←/→ 탐색)">
+      <img class="thumb" loading="lazy" src="${thumb(m.rel)}" onclick="zoomAt(${lbAdd(fullUrl(m.rel), m.rel, g.rep, g.special)})"
+           title="${esc(m.rel)}&#10;클릭=미리보기 (←/→ 탐색, Space=강조)">
       <div class="tiny" style="display:flex;gap:6px;align-items:center">
         ${g.special?'<span class="badge warn">강조</span>':''}
         <span class="spacer" style="flex:1"></span>${m.w ? `${m.w}×${m.h} · ` : ''}${kb(m.bytes)}</div>
@@ -447,7 +450,7 @@ function render() {
 
 function groupCard(g) {
   const picked = PICK && (PICK.rel === g.rep || PICK.other === g.rep);
-  const idxs = g.members.map(m => lbAdd(fullUrl(m.rel), m.rel));
+  const idxs = g.members.map(m => lbAdd(fullUrl(m.rel), m.rel, m.rel, g.special));
   const repAt = g.members.findIndex(m => m.rel === g.rep);
   const repIdx = idxs[repAt >= 0 ? repAt : 0];
   let h = `<div class="group ${g.special?'special':''}">
@@ -482,22 +485,50 @@ function groupCard(g) {
 let LBLIST = [], LBIDX = -1;
 const fullUrl = rel => `/full?ds=${encodeURIComponent(DS)}&rel=${encodeURIComponent(rel)}`;
 const dsFullUrl = (name, rel) => `/dsfull?name=${encodeURIComponent(name)}&rel=${encodeURIComponent(rel)}`;
-function lbAdd(url, label) { LBLIST.push({ url, label }); return LBLIST.length - 1; }
+/* rel 을 주면 라이트박스에서 강조 토글이 가능해진다 (raw dedup 항목만 — 제외/데이터셋 탭은 미지원). */
+function lbAdd(url, label, rel, special) {
+  LBLIST.push({ url, label, rel, special: !!special });
+  return LBLIST.length - 1;
+}
+function lbRefreshBar() {
+  const it = LBLIST[LBIDX];
+  if (!it) return;
+  document.getElementById('lightbox-cap').textContent = `${LBIDX + 1} / ${LBLIST.length} · ${it.label}`;
+  const b = document.getElementById('lightbox-sp');
+  if (it.rel === undefined) { b.style.display = 'none'; return; }
+  b.style.display = '';
+  b.textContent = it.special ? '★ 강조 해제 (Space)' : '☆ 강조 (Space)';
+  b.style.borderColor = it.special ? 'var(--warn)' : '';
+  b.style.color = it.special ? 'var(--warn)' : '';
+}
 function zoomAt(i) {
   if (!LBLIST.length) return;
   LBIDX = ((i % LBLIST.length) + LBLIST.length) % LBLIST.length;
-  const it = LBLIST[LBIDX];
-  document.getElementById('lightbox-img').src = it.url;
-  document.getElementById('lightbox-cap').textContent = `${LBIDX + 1} / ${LBLIST.length} · ${it.label}`;
+  document.getElementById('lightbox-img').src = LBLIST[LBIDX].url;
+  lbRefreshBar();
   const lb = document.getElementById('lightbox');
   if (!lb.open) lb.showModal();
 }
-document.getElementById('lightbox').onclick = e => e.target.closest('img') || e.currentTarget.close();
+/* 미리보기를 닫지 않고 현재 이미지(그룹이면 그 그룹)의 강조를 토글한다.
+   배경 목록은 재로딩되지만 순서가 안정적이라 현재 위치를 유지한다. */
+async function lbSpecial() {
+  const it = LBLIST[LBIDX];
+  if (!it || it.rel === undefined) return;
+  const on = !it.special;
+  if (!(await act('/api/special', { rel: it.rel, on }))) return;
+  toast(on ? '강조 (2R)' : '강조 해제');
+  const keep = LBIDX;
+  await load();          // render() 가 LBLIST 를 새 상태로 재구성 (LBIDX 는 리셋됨)
+  LBIDX = keep;
+  lbRefreshBar();
+}
+document.getElementById('lightbox').onclick = e => e.target.closest('img,button') || e.currentTarget.close();
 document.getElementById('lightbox-img').onclick = () => zoomAt(LBIDX + 1);
 document.addEventListener('keydown', e => {
   if (!document.getElementById('lightbox').open) return;
   if (e.key === 'ArrowLeft')       { e.preventDefault(); zoomAt(LBIDX - 1); }
   else if (e.key === 'ArrowRight') { e.preventDefault(); zoomAt(LBIDX + 1); }
+  else if (e.key === ' ')          { e.preventDefault(); lbSpecial(); }
 });
 
 // -- 데이터셋 탭 (dataset/ 태깅 · 캡션 · toml) --------------------------------
@@ -526,7 +557,7 @@ function renderProc() {
     return;
   }
   let html = `<section><div class="sechead"><h2>데이터셋</h2>
-    <span class="tiny">태깅 → 캡션 검수 → toml 생성 → ./3_run_training.sh &lt;이름&gt;</span></div>`;
+    <span class="tiny">태깅 → 캡션 검수 → toml 생성 → ./2_run_training.sh &lt;이름&gt;</span></div>`;
   for (const d of PROC) {
     const rep = d.repeats.length ? `repeat ${d.repeats.join('/')}` : '평면';
     const capCls = d.images && d.captions >= d.images ? 'ok' : (d.captions ? 'warn' : '');
@@ -654,13 +685,33 @@ document.getElementById('cfg-dry').onclick = async () => {
   document.getElementById('cfg-editor').value = res.info.toml;
   document.getElementById('cfg-preview').innerHTML = cfgStats(res.info);
 };
+/* 저장 직후 분석 표시: 블록별 에폭당 스텝(@b4, multires 합산) + LR 추천 + 권장 EPOCHS */
+function lrStats(a) {
+  const blocks = a.blocks.map(b =>
+    `${b.steps}<span class="tiny">(${esc(b.resolution)} · ${b.images}장×rep→${b.reps})</span>`).join(' + ');
+  let h = `<div class="msg ok">에폭당 스텝 ≈ <b>${a.steps_per_epoch}</b> @ 글로벌 배치 ${a.batch}`
+    + (a.multires ? ` = ${blocks} <span class="badge warn">multires ×${a.blocks.length}</span>`
+                  : (a.blocks.length ? ` <span class="tiny">(${blocks})</span>` : ''))
+    + `<br>LR 추천: <b>${esc(a.lr)}</b> — ${esc(a.lr_note)}`
+    + (a.rec_epochs ? `<br>목표 ${a.target_steps[0]}–${a.target_steps[1]} 스텝 기준 권장 EPOCHS
+        <b>${a.rec_epochs[0]}${a.rec_epochs[1] !== a.rec_epochs[0] ? '–' + a.rec_epochs[1] : ''}</b>
+        <span class="tiny">(config.&lt;trigger&gt;.env 의 EPOCHS/LR)</span>` : '')
+    + `</div>`;
+  if (a.missing_dirs && a.missing_dirs.length)
+    h += `<div class="msg err">image_dir 를 찾지 못함 (스텝 어림에서 0장 처리): ${a.missing_dirs.map(esc).join(', ')}</div>`;
+  if (a.broken_links)
+    h += `<div class="msg err">깨진 심링크 ${a.broken_links}개 — 학습에서도 못 읽는다.
+      원시 데이터셋 이름이 바뀌었을 수 있다 → 원시 dedup 탭에서 재익스포트할 것.</div>`;
+  return h;
+}
 document.getElementById('cfg-save').onclick = async () => {
   const res = await act2('/api/save-toml',
     { name: CFGDS, text: document.getElementById('cfg-editor').value });
   if (!res) return;
   document.getElementById('cfg-preview').innerHTML =
     `<div class="msg ok">저장 완료 — ${esc(res.path)}<br>
-     next: <kbd>./3_run_training.sh ${esc(CFGDS)}</kbd></div>`
+     next: <kbd>./2_run_training.sh ${esc(CFGDS)}</kbd></div>`
+    + (res.analysis ? lrStats(res.analysis) : '')
     + (res.warning ? `<div class="msg err">${esc(res.warning)}</div>` : '');
   toast(`toml 저장: dataset/${CFGDS}.toml`);
   loadProc();
